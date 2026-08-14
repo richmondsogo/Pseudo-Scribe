@@ -38,6 +38,10 @@ python generate.py
 
 The wizard asks for course metadata and an outline, then runs terminology extraction, chapter generation, QA, typesetting, and PDF compilation. If a previous run exists the wizard offers to resume.
 
+Source materials (optional)
+---------------------------
+You only need to provide the course outline and learning outcomes for the generator to produce full lecture notes. Supplying additional source materials (lecture slides, readings, or notes) is optional and may improve coverage or example content. If you do not have extra materials, leave the source materials prompt blank when running the interactive wizard.
+
 Requirements
 ------------
 - Python 3.11 or later
