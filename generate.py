@@ -117,40 +117,65 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
     if provider not in ("gemini", "google", "googleai"):
         raise RuntimeError("LLM_PROVIDER must be set to 'gemini' for this deployment. Remove references to OpenAI.")
 
-    # Support for Google's Gemini (via google-generativeai client)
+    # Support for Google's Gemini client: prefer google.genai (newer) and fallback to google.generativeai (legacy)
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY must be set to use Gemini provider")
+
+    genai = None
+    # Try new client first
     try:
-        import google.generativeai as genai
-    except Exception as e:
-        raise RuntimeError("google-generativeai package not installed. Add it to requirements.txt and install.") from e
-    # Configure library
-    try:
-        genai.configure(api_key=api_key)
+        import google.genai as genai_new
     except Exception:
-        # older/newer clients may differ; try setting attribute
+        genai_new = None
+    if genai_new:
+        genai = genai_new
+        # new client: configure
         try:
-            genai.api_key = api_key
+            genai.configure(api_key=api_key)
+        except Exception:
+            try:
+                genai.api_key = api_key
+            except Exception:
+                pass
+        gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
+        try:
+            # google.genai uses generate_text(model=..., input=...)
+            resp = genai.generate_text(model=gmodel, input=prompt)
+        except Exception as e:
+            raise RuntimeError(f"Gemini (google.genai) call failed: {e}")
+        # response typically has .text
+        out = getattr(resp, "text", None) or (resp.get("text") if isinstance(resp, dict) else None)
+        if not out:
+            out = str(resp)
+        return out
+
+    # Fallback to legacy client
+    try:
+        import google.generativeai as genai_legacy
+    except Exception as e:
+        raise RuntimeError("No supported Google Gemini client installed. Install 'google-genai' or 'google-generativeai' and set GEMINI_API_KEY.") from e
+    # legacy configure
+    try:
+        genai_legacy.configure(api_key=api_key)
+    except Exception:
+        try:
+            genai_legacy.api_key = api_key
         except Exception:
             pass
-    # Choose a text model name if not provided
     gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
-    # Use the generate_text API. Many versions return an object or dict with 'text' or 'candidates'.
     try:
-        resp = genai.generate_text(model=gmodel, text=prompt)
+        resp = genai_legacy.generate_text(model=gmodel, text=prompt)
     except Exception as e:
         raise RuntimeError(f"Gemini provider call failed: {e}")
 
     # Try to extract text from known shapes
-    # 1) object with .text attribute
     out = None
     try:
         out = getattr(resp, "text", None)
     except Exception:
         out = None
     if not out and isinstance(resp, dict):
-        # Some clients return {'candidates': [{'content': '...'}]} or {'text': '...'}
         if "text" in resp:
             out = resp.get("text")
         elif "candidates" in resp and isinstance(resp.get("candidates"), list) and resp["candidates"]:
@@ -162,7 +187,6 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
         elif "output" in resp:
             out = resp.get("output")
     if not out:
-        # Fallback to string conversion
         out = str(resp)
     return out
 
