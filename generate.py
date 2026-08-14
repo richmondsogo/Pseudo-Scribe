@@ -992,7 +992,15 @@ def interactive_setup() -> str:
     print(f"Department: {department}")
     print(f"University: {university}")
     print(f"Session:    {academic_session}")
-    print(f"Outline:    {outline_path.name}")
+    # Outline may have been pasted (outline_path is None). Use outline_name if available.
+    outline_display = None
+    if 'outline_path' in locals() and outline_path:
+        outline_display = outline_path.name
+    elif 'outline_name' in locals() and outline_name:
+        outline_display = outline_name
+    else:
+        outline_display = "none provided"
+    print(f"Outline:    {outline_display}")
     print("─" * 40)
     ready = input("Ready to generate your lecture note? [Y/n]: ").strip().lower()
     if ready in ("n", "no"):
