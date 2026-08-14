@@ -33,6 +33,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
+# Load .env if present so environment variables in .env are available at runtime
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    # If python-dotenv is not installed, continue — environment may be set externally
+    pass
+
 # Environment-driven configuration
 # Default provider set to Gemini (Google) for this deployment
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
