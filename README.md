@@ -1,103 +1,131 @@
 ﻿Lecture Notes Generator (V1)
 =================================
 
-This CLI generates complete university lecture notes (one PDF) from a course outline while maintaining terminology consistency across the course. It is designed to be simple, resumable, and cost-conscious for V1.
+Summary
+-------
+A command-line tool that generates a single PDF of lecture notes for a course from a course outline. The tool keeps course-wide terminology consistent. This repository is a V1 reference implementation and uses an LLM (OpenAI by default).
 
-Important: This implementation is a V1 reference and relies on an LLM provider (OpenAI supported). Follow the setup steps below.
+Design goals (V1)
+-----------------
+- Simple: an interactive wizard for common tasks.
+- Resumable: runs can be resumed after interruptions.
+- Cost-aware: prompts and steps reduce unnecessary LLM calls.
 
-Quick overview
---------------
+What the tool does
+------------------
+- Extracts key terms from the course outline and optional sources.
+- Generates draft chapters in Markdown.
+- Runs QA passes on chapters and the assembled course.
+- Produces LaTeX and compiles a PDF with pdflatex.
 
-Pipeline:
-COURSE INPUT -> Initial Terminology Extraction -> Chapter Generation -> Chapter QA -> Terminology Validation -> ... -> Final QA -> LaTeX Typesetting -> LaTeX Compilation -> PDF
+Quick start (recommended)
+-------------------------
+1. Create a Python virtual environment and install dependencies:
 
-Project structure (per course)
-
-courses/\n  <COURSE_ID>/\n    course_profile.md\n    outline.json\n    terminology.json\n    generation_state.json\n    prompts/\n      <prompt templates copied at init time>\n    drafts/\n      ch01.md\n    tex/\n      ch01.tex\n    final/\n      final_course.md\n    main.tex\n    output.pdf
-
-Requirements
-------------
-- Python 3.11+
-- LaTeX distribution with pdflatex on PATH (for compile)
-- OpenAI API key (or another provider if you extend the call_llm function)
-
-Installation
-------------
-
-1. Create a Python virtualenv and install requirements:
-
-```bash
+```powershell
 python -m venv .venv
-.\.venv\Scripts\activate
+.\.venv\Scripts\Activate
 pip install -r requirements.txt
 ```
 
-2. Create an .env file from .env.example and set your OPENAI_API_KEY.
+2. Copy .env.example to .env and set OPENAI_API_KEY.
 
-Interactive usage
------------------
+3. Run the interactive generator:
 
-Run the interactive setup and generation wizard (recommended for normal users):
-
-```bash
+```powershell
 python generate.py
 ```
 
-This launches a simple guided setup that asks for course metadata, an outline file, and optional source materials, then automatically runs terminology extraction, chapter generation, chapter QA, final QA, typesetting and PDF compilation. It is resumable: if an incomplete course exists, the wizard offers to resume it.
+The wizard asks for course metadata and an outline, then runs terminology extraction, chapter generation, QA, typesetting, and PDF compilation. If a previous run exists the wizard offers to resume.
 
-Advanced commands (for debugging or scripting)
----------------------------------------------
+Requirements
+------------
+- Python 3.11 or later
+- A LaTeX distribution with pdflatex on PATH
+- OPENAI_API_KEY set (or update call_llm to use another provider)
 
-If you prefer manual control, the existing commands remain available:
+Project layout (per course)
+---------------------------
+Each course uses a folder under courses/:
 
-Initialize a new course folder template:
+- courses/<COURSE_ID>/
+  - course_profile.md         # Course metadata
+  - outline.json              # Course outline
+  - terminology.json          # Canonical term registry
+  - generation_state.json     # Tracks progress
+  - prompts/                  # Prompt templates copied at init
+  - drafts/                   # Draft Markdown chapters (ch01.md)
+  - tex/                      # Generated LaTeX files (ch01.tex)
+  - final/                    # Final assembled Markdown/LaTeX
+  - main.tex                  # LaTeX entry file
+  - output.pdf                # Final PDF
 
-```bash
-python generate.py init INS202_HCI
+Commands
+--------
+- Init a course skeleton:
+
+```powershell
+python generate.py init <COURSE_ID>
 ```
 
-Run a single step (examples):
+- Run terminology extraction:
 
-```bash
-python generate.py terminology INS202_HCI
-python generate.py chapter INS202_HCI 1
-python generate.py all INS202_HCI
-python generate.py qa INS202_HCI
-python generate.py compile INS202_HCI
-python generate.py build INS202_HCI
+```powershell
+python generate.py terminology <COURSE_ID>
 ```
 
-How terminology consistency works
---------------------------------
-- terminology.json is the canonical, course-level registry.
-- The terminology extractor initially populates it from the outline and sources.
-- Each chapter's generation must declare any new terms in a [TERMINOLOGY] JSON block.
-- The CLI validates proposed definitions against existing ones. If a conflict is detected the process stops and reports the conflict; the CLI never silently overwrites definitions.
+- Generate a chapter:
+
+```powershell
+python generate.py chapter <COURSE_ID> <CHAPTER_NUM>
+```
+
+- Run all generation steps:
+
+```powershell
+python generate.py all <COURSE_ID>
+```
+
+- Run QA only:
+
+```powershell
+python generate.py qa <COURSE_ID>
+```
+
+- Produce PDF (typeset + compile):
+
+```powershell
+python generate.py compile <COURSE_ID>
+python generate.py build <COURSE_ID>
+```
+
+Terminology and consistency
+---------------------------
+- terminology.json is the course-wide source of truth for terms and definitions.
+- The extractor seeds terminology.json from the outline and optional sources.
+- Chapter generators must declare new terms in a [TERMINOLOGY] JSON block inside the chapter output.
+- The CLI validates proposed definitions against the registry. On conflict, the process stops and reports the issue. The tool never silently overwrites definitions.
 
 Conflict handling
 -----------------
-- If a generated chapter proposes a definition that contradicts an existing definition, generation stops and the conflict is reported.
-- The user must resolve the conflict by editing terminology.json or the draft and re-running generation.
+If a chapter proposes a conflicting definition:
+- Generation stops and prints the conflicting term and sources.
+- Resolve the conflict by editing terminology.json or the draft, then re-run the step.
 
-Source materials
-----------------
-- Optional source materials may be used by prompt templates. Do not supply source citations unless supported by the materials.
+Troubleshooting
+---------------
+- pdflatex not found: install a LaTeX distribution and add pdflatex to PATH.
+- JSON parse failures from the LLM: check *_raw.txt files saved next to outputs for the raw responses.
+- API failures: check OPENAI_API_KEY and network connectivity.
 
-Common errors and troubleshooting
---------------------------------
-- Missing LaTeX: Ensure 'pdflatex' is on PATH. The compile step will fail otherwise.
-- Invalid prompt responses: Raw LLM outputs are saved to *_raw.txt files for inspection if JSON parsing fails.
-- API issues: Check OPENAI_API_KEY and network connectivity.
-
-Extending and customizing
--------------------------
-- To support another provider, modify call_llm in generate.py.
-- Prompt templates are in prompts/*.txt; edit or replace them to tune output.
+Extending the tool
+------------------
+- Add another LLM provider by updating call_llm in generate.py.
+- Change prompts by editing the prompts/ templates used at init.
 
 Example workflow
 ----------------
-
-```bash
+```powershell
 python generate.py init INS202_HCI
 # edit course_profile.md and outline.json
 python generate.py terminology INS202_HCI
@@ -106,6 +134,15 @@ python generate.py qa INS202_HCI
 python generate.py compile INS202_HCI
 ```
 
-License and safety
+Safety and license
 ------------------
-This tool delegates academic content generation to an LLM. Validate critical material before relying on it for assessment or teaching.
+This tool uses an LLM to generate academic material. Review generated content before use in teaching or assessment. See LICENSE for license details.
+
+Contributing
+------------
+Contributions are welcome. Open an issue or a pull request with a clear description of the change and motivation.
+
+Acknowledgements
+----------------
+This repository provides a V1 reference implementation intended as a starting point for research and experimentation.
+
