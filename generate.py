@@ -136,26 +136,35 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
             pass
     # Choose a text model name if not provided
     gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
-    # The client may offer a simple generate_text API
+    # Use the generate_text API. Many versions return an object or dict with 'text' or 'candidates'.
     try:
-        # predict using text generation
         resp = genai.generate_text(model=gmodel, text=prompt)
-        # response object may contain .text or .output
-        out = getattr(resp, "text", None) or resp.get("text") if isinstance(resp, dict) else None
-        if not out:
-            # try string conversion
-            out = str(resp)
-        return out
+    except Exception as e:
+        raise RuntimeError(f"Gemini provider call failed: {e}")
+
+    # Try to extract text from known shapes
+    # 1) object with .text attribute
+    out = None
+    try:
+        out = getattr(resp, "text", None)
     except Exception:
-        # Fallback: try the 'chat' style
-        try:
-            resp = genai.chat(model=gmodel, messages=[{"role": "user", "content": prompt}])
-            # extract from resp
-            if isinstance(resp, dict):
-                return resp.get("candidates", [])[0].get("content", "")
-            return str(resp)
-        except Exception as e:
-            raise RuntimeError(f"Gemini provider call failed: {e}")
+        out = None
+    if not out and isinstance(resp, dict):
+        # Some clients return {'candidates': [{'content': '...'}]} or {'text': '...'}
+        if "text" in resp:
+            out = resp.get("text")
+        elif "candidates" in resp and isinstance(resp.get("candidates"), list) and resp["candidates"]:
+            cand = resp["candidates"][0]
+            if isinstance(cand, dict) and "content" in cand:
+                out = cand["content"]
+            else:
+                out = str(cand)
+        elif "output" in resp:
+            out = resp.get("output")
+    if not out:
+        # Fallback to string conversion
+        out = str(resp)
+    return out
 
 # --- File utilities ---
 
