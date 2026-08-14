@@ -34,8 +34,10 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
 
 # Environment-driven configuration
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").lower()
-LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini")
+# Default provider set to Gemini (Google) for this deployment
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
+# Default model name is a Gemini text model. Override with GEMINI_MODEL or LLM_MODEL.
+LLM_MODEL = os.getenv("LLM_MODEL", "models/text-bison-001")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 MAX_CHAPTER_RETRIES = int(os.getenv("MAX_CHAPTER_RETRIES", "2"))
 
@@ -54,7 +56,7 @@ def error(msg: str) -> None:
 # --- LLM wrapper ---
 
 def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
-    """Call configured LLM provider. For V1 only OpenAI is implemented.
+    """Call configured LLM provider. This deployment uses Google Gemini (google.generativeai).
 
     This function supports a DRY_RUN mode via the environment variable DRY_RUN=1|true which returns canned responses
     for a quick smoke test without making external API calls.
@@ -104,63 +106,48 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
             return "\\chapter{Sample Chapter}\n\\section{Introduction}\nSample content.\n"
         return "DRY_RUN"
 
-    if provider == "openai":
+    if provider not in ("gemini", "google", "googleai"):
+        raise RuntimeError("LLM_PROVIDER must be set to 'gemini' for this deployment. Remove references to OpenAI.")
+
+    # Support for Google's Gemini (via google-generativeai client)
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY must be set to use Gemini provider")
+    try:
+        import google.generativeai as genai
+    except Exception as e:
+        raise RuntimeError("google-generativeai package not installed. Add it to requirements.txt and install.") from e
+    # Configure library
+    try:
+        genai.configure(api_key=api_key)
+    except Exception:
+        # older/newer clients may differ; try setting attribute
         try:
-            import openai
-        except Exception as e:
-            raise RuntimeError("OpenAI package not installed. Install requirements.txt and set OPENAI_API_KEY in environment.") from e
-        # Use ChatCompletion for structured conversational behavior
-        kwargs = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": temperature,
-        }
-        if max_tokens:
-            kwargs["max_tokens"] = max_tokens
-        resp = openai.ChatCompletion.create(**kwargs)
-        return resp.choices[0].message.content
-    elif provider in ("gemini", "google", "googleai"):
-        # Support for Google's Gemini (via google-generative-ai client) if installed
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY must be set to use Gemini provider")
-        try:
-            import google.generativeai as genai
-        except Exception as e:
-            raise RuntimeError("google-generativeai package not installed. Add it to requirements.txt and install.") from e
-        # Configure library
-        try:
-            genai.configure(api_key=api_key)
+            genai.api_key = api_key
         except Exception:
-            # older/newer clients may differ; try setting attribute
-            try:
-                genai.api_key = api_key
-            except Exception:
-                pass
-        # Choose a text model name if not provided
-        gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
-        # The client may offer a simple generate_text API
+            pass
+    # Choose a text model name if not provided
+    gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
+    # The client may offer a simple generate_text API
+    try:
+        # predict using text generation
+        resp = genai.generate_text(model=gmodel, text=prompt)
+        # response object may contain .text or .output
+        out = getattr(resp, "text", None) or resp.get("text") if isinstance(resp, dict) else None
+        if not out:
+            # try string conversion
+            out = str(resp)
+        return out
+    except Exception:
+        # Fallback: try the 'chat' style
         try:
-            # predict using text generation
-            resp = genai.generate_text(model=gmodel, text=prompt)
-            # response object may contain .text or .output
-            out = getattr(resp, "text", None) or resp.get("text") if isinstance(resp, dict) else None
-            if not out:
-                # try string conversion
-                out = str(resp)
-            return out
-        except Exception:
-            # Fallback: try the 'chat' style
-            try:
-                resp = genai.chat(model=gmodel, messages=[{"role": "user", "content": prompt}])
-                # extract from resp
-                if isinstance(resp, dict):
-                    return resp.get("candidates", [])[0].get("content", "")
-                return str(resp)
-            except Exception as e:
-                raise RuntimeError(f"Gemini provider call failed: {e}")
-    else:
-        raise RuntimeError(f"Unsupported LLM_PROVIDER: {provider}. Supported: openai, gemini")
+            resp = genai.chat(model=gmodel, messages=[{"role": "user", "content": prompt}])
+            # extract from resp
+            if isinstance(resp, dict):
+                return resp.get("candidates", [])[0].get("content", "")
+            return str(resp)
+        except Exception as e:
+            raise RuntimeError(f"Gemini provider call failed: {e}")
 
 # --- File utilities ---
 
