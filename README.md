@@ -28,7 +28,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-2. Copy .env.example to .env and set OPENAI_API_KEY.
+2. Copy .env.example to .env and set GEMINI_API_KEY (or GOOGLE_API_KEY). Configure GEMINI_MODEL if you want a specific Gemini model.
 
 3. Run the interactive generator:
 
@@ -46,7 +46,7 @@ Requirements
 ------------
 - Python 3.11 or later
 - A LaTeX distribution with pdflatex on PATH
-- OPENAI_API_KEY set (or update call_llm to use another provider)
+- GEMINI_API_KEY or GOOGLE_API_KEY set (or update call_llm to use another provider)
 
 Project layout (per course)
 ---------------------------
@@ -120,7 +120,7 @@ Troubleshooting
 ---------------
 - pdflatex not found: install a LaTeX distribution and add pdflatex to PATH.
 - JSON parse failures from the LLM: check *_raw.txt files saved next to outputs for the raw responses.
-- API failures: check OPENAI_API_KEY and network connectivity.
+- API failures: check GEMINI_API_KEY/GOOGLE_API_KEY and network connectivity.
 
 Extending the tool
 ------------------
