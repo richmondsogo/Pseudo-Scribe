@@ -969,17 +969,20 @@ def interactive_setup() -> str:
                 outline_name = ppath.name
                 break
             print(f"File not found: {p}. Please try again.")
-    # Optional source materials
-    src_choice = input("Do you have source materials for this course? [y/N]: ").strip().lower()
+    # Source materials (optional)
+    print("\nSource materials are optional. The generator works from the course outline and learning outcomes alone.")
+    print("If you have slides or readings you want the generator to use, provide a path. Otherwise press Enter to skip.")
     source_materials = None
-    if src_choice in ("y", "yes"):
-        while True:
-            s = input("Path to file or directory with source materials: ").strip()
-            spath = Path(s)
-            if spath.exists():
-                source_materials = spath
-                break
-            print(f"Path not found: {s}. Try again.")
+    while True:
+        s = input("Path to file or directory with source materials (leave blank to skip): ").strip()
+        if not s:
+            # user chose to skip
+            break
+        spath = Path(s)
+        if spath.exists():
+            source_materials = spath
+            break
+        print(f"Path not found: {s}. Enter a valid path or press Enter to skip.")
     # Confirmation
     print("\nCourse\n" + "─" * 40)
     print(f"Code:       {course_code}")
