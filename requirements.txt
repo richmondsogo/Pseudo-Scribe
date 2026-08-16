@@ -1,5 +1,7 @@
 python-dotenv>=1.0.0
 python-docx>=0.8.11
 PyPDF2>=3.0.0
+pypdf>=4.0.0
 google-genai>=0.2.0
 # No CLI framework dependency: using argparse from stdlib
+# Groq and OpenRouter providers use stdlib urllib, no extra dependency required

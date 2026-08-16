@@ -1,0 +1,36 @@
+{
+  "course_code": "CSC 301",
+  "course_title": "Data Structures",
+  "department": "Computer Science",
+  "university": "Osun State University",
+  "academic_session": "2026/2027",
+  "level": "300",
+  "chapters": [
+    {
+      "number": 1,
+      "title": "Data Types and Memory Representation",
+      "topic": "Primitive types, data representation in memory"
+    },
+    {
+      "number": 2,
+      "title": "Pointers and Memory Management",
+      "topic": "Pointers and references, stack and heap allocation, run time storage management"
+    },
+    {
+      "number": 3,
+      "title": "Basic Data Structures: Arrays, Records, and Strings",
+      "topic": "Arrays, records, strings and string processing"
+    },
+    {
+      "number": 4,
+      "title": "Stacks, Queues, and Linked Structures",
+      "topic": "Stacks, queues, linked structures, implementation strategies for stacks and queues"
+    },
+    {
+      "number": 5,
+      "title": "Tree Data Structures",
+      "topic": "Trees, implementation strategies for trees"
+    }
+  ],
+  "prepared_by": "Tunde Sardine"
+}

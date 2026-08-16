@@ -1,0 +1,105 @@
+\documentclass[12pt]{report}
+\usepackage[top=2.5cm,bottom=2.5cm,left=3cm,right=2.5cm]{geometry}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{array}
+\usepackage{float}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{parskip}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\begin{titlepage}
+\thispagestyle{empty}
+\centering
+\vspace*{2cm}
+{\LARGE Data Structures}\\[1cm]
+{\Large CSC 301}\\[1cm]
+{\Large Lecture Notes}\\[1cm]
+{\Large Chapter 5: Tree Data Structures}\\[1.5cm]
+Computer Science\\
+Osun State University\\
+2026/2027\\[2cm]
+Prepared by\\
+Tunde Sardine
+\end{titlepage}
+
+\pagestyle{plain}
+\tableofcontents
+\newpage
+
+\setcounter{chapter}{4}
+\chapter{Tree Data Structures}
+
+\section{Introduction to Tree Data Structures} Trees are hierarchical data structures composed of nodes connected by edges, with a single root node and child nodes forming subtrees. Unlike linear structures such as arrays or linked lists, trees allow efficient representation of hierarchical relationships, making them essential for modeling real-world systems like file systems, organizational charts, and decision trees. This chapter explores tree definitions, traversal algorithms, and implementation strategies for binary trees, binary search trees (BSTs), and balanced trees.  
+
+\subsection{Tree Terminology and Properties}  
+A tree consists of nodes connected by edges. Key terms include:  
+- \textbf{Root}: The topmost node with no parent.  
+- \textbf{Leaf}: A node with no children.  
+- \textbf{Internal Node}: A node with at least one child.  
+- \textbf{Subtree}: A tree formed by a node and its descendants.  
+- \textbf{Depth}: The number of edges from the root to a node.  
+- \textbf{Height}: The maximum depth of any node in the tree.  
+
+Trees can be classified by constraints on node degrees. A \textbf{binary tree} restricts each node to at most two children (left and right). A \textbf{full binary tree} has all nodes with 0 or 2 children. A \textbf{complete binary tree} fills all levels except possibly the last, which is filled left to right.  
+
+\subsection{Tree Traversal Algorithms}  
+Traversal algorithms visit nodes in specific orders:  
+\begin{itemize}  
+\item \textbf{Preorder (Root, Left, Right)}: Visit the root, then recursively traverse the left and right subtrees.  
+\item \textbf{Inorder (Left, Root, Right)}: Traverse the left subtree, visit the root, then the right subtree. For BSTs, inorder traversal yields nodes in ascending order.  
+\item \textbf{Postorder (Left, Right, Root)}: Traverse left and right subtrees before visiting the root. Useful for deleting nodes or evaluating expressions.  
+\end{itemize}  
+Example: For a tree with root A, left child B, and right child C, preorder traversal visits A → B → C, while inorder visits B → A → C.  
+
+\subsection{Implementation Strategies for Trees}  
+Trees are typically implemented using node-based structures. A \texttt{Node} struct contains data and pointers to child nodes:  
+\begin{verbatim}  
+struct Node {  
+    int data;  
+    Node* left;  
+    Node* right;  
+};  
+\end{verbatim}  
+\subsubsection{Binary Search Trees (BSTs)}  
+A BST enforces the property that for any node, all left descendants have values less than the node, and all right descendants have values greater. Insertion and deletion maintain this property:  
+- \textbf{Insertion}: Start at the root. If the new value is less than the current node, move left; otherwise, move right. Insert as a leaf.  
+- \textbf{Deletion}: Three cases arise:  
+  1. Node is a leaf: Remove it.  
+  2. Node has one child: Replace it with its child.  
+  3. Node has two children: Replace it with its inorder successor (smallest node in the right subtree) and delete the successor.  
+
+\subsubsection{Balanced Trees}  
+Unbalanced BSTs can degrade to linked lists in the worst case. Balanced trees, such as AVL trees and red-black trees, maintain height $O(\log n)$ through rotations during insertions and deletions. For example, AVL trees use balance factors (differences in subtree heights) to trigger rotations.  
+
+\subsection{Applications of Trees}  
+Trees are widely used in:  
+- \textbf{File Systems}: Hierarchical organization of files and directories.  
+- \textbf{Expression Parsing}: Abstract syntax trees represent mathematical expressions.  
+- \textbf{Database Indexing}: B-trees enable efficient disk-based searches.  
+- \textbf{Network Routing}: Spanning trees optimize path selection.  
+
+\section{Conclusion}  
+Trees provide a flexible framework for organizing hierarchical data. Understanding traversal algorithms and implementation strategies is critical for designing efficient data structures. Balanced trees, in particular, ensure optimal performance for dynamic operations.  
+
+\section*{Tutorial Questions}  
+\begin{enumerate}  
+\item Define a binary tree and explain the difference between a full binary tree and a complete binary tree.  
+\item Describe the steps for performing an inorder traversal of a binary tree.  
+\item How does a BST ensure efficient search operations, and what is its worst-case time complexity?  
+\item Explain the process of deleting a node with two children in a BST.  
+\item What is the purpose of rotations in AVL trees, and how do they maintain balance?  
+\item Compare the memory allocation strategies for static arrays and dynamic trees.  
+\item Write a recursive function to calculate the height of a binary tree.  
+\item Discuss one application of trees in computer science and explain its relevance.  
+\end{enumerate}
+
+\end{document}
