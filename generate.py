@@ -29,11 +29,13 @@ import subprocess
 import sys
 import shutil
 import textwrap
+import time
+import random
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, List
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Load .env if present so environment variables in .env are available at runtime
 try:
@@ -48,22 +50,49 @@ except Exception:
 # Default provider set to Gemini (Google) for this deployment
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").lower()
 # Default model name is a Gemini text model. Override with GEMINI_MODEL or LLM_MODEL.
-LLM_MODEL = os.getenv("LLM_MODEL", "models/text-bison-001")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-3.6-flash")
 LLM_TEMPERATURE = float(os.getenv("LLM_TEMPERATURE", "0.2"))
 MAX_CHAPTER_RETRIES = int(os.getenv("MAX_CHAPTER_RETRIES", "2"))
-# Concurrency for chapter generation (configurable via env)
+# Retries for transient API failures (500/503/429/timeouts) on a single call_llm() call,
+# separate from MAX_CHAPTER_RETRIES which re-runs a whole chapter after a QA failure.
+MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", "5"))
+API_RETRY_BASE_DELAY = float(os.getenv("API_RETRY_BASE_DELAY", "2.0"))
+# Cap on how much of each chapter is sent to the final course-wide QA pass. Keeps that single
+# call's size predictable regardless of how many/how long the chapters are, instead of scaling
+# with the whole course (which is what blew past a 6000 TPM free-tier limit in practice).
+FINAL_QA_EXCERPT_CHARS = int(os.getenv("FINAL_QA_EXCERPT_CHARS", "1000"))
+# Optional: route the two token-heavy calls (final QA, per-chapter typesetting) to a different
+# provider than everything else. Useful because these two calls are infrequent but large
+# (won't fit a small free-tier TPM budget), while chapter writing/QA calls are frequent but
+# small — a low-TPM/high-RPD provider suits the latter, a high-context provider suits the
+# former, and you may want different providers for each. Falls back to LLM_PROVIDER if unset.
+HEAVY_CALL_PROVIDER = os.getenv("HEAVY_CALL_PROVIDER")
+# Both default OFF to minimize LLM calls per chapter. Chapters are now written directly as
+# LaTeX (see prompts/chapter_writer.txt), which already removes the separate typesetting call;
+# these two remove the per-chapter QA call and the LLM-based conflict-check call. Conflicts are
+# still detected and logged when this is off — they're just resolved by always keeping the
+# first definition, without spending a call asking the model whether it's a "real" conflict.
+# Turn either back on if you have quota to spare and want the extra scrutiny.
+ENABLE_CHAPTER_QA = os.getenv("ENABLE_CHAPTER_QA", "0").lower() in ("1", "true", "yes")
+ENABLE_CONFLICT_CHECK = os.getenv("ENABLE_CONFLICT_CHECK", "0").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Chapters can generate concurrently via a thread pool. Defaults to 1 (sequential) deliberately:
+# concurrency doesn't reduce the *total* number of API calls a course needs (that's what actually
+# trips daily-request quotas), and it makes several chapters' calls land in the same short window,
+# which is exactly what trips per-minute (TPM/RPM) quotas. Raise this only if you have quota to
+# spare (a paid tier, or a generous provider) and want faster wall-clock time.
 try:
-    MAX_CONCURRENT_CHAPTERS = int(os.getenv("MAX_CONCURRENT_CHAPTERS", "3"))
-    if MAX_CONCURRENT_CHAPTERS < 1:
-        raise ValueError()
-except Exception:
-    # Fallback to 1 for safety if invalid
+    MAX_CONCURRENT_CHAPTERS = max(1, int(os.getenv("MAX_CONCURRENT_CHAPTERS", "1")))
+except ValueError:
     MAX_CONCURRENT_CHAPTERS = 1
-# Global LLM call counter (thread-safe)
-LLM_CALL_COUNT = 0
-LLM_COUNT_LOCK = threading.Lock()
-# Lock to protect generation_state.json updates
+# Protects generation_state.json read-modify-write cycles when chapters run concurrently.
 STATE_LOCK = threading.Lock()
+# Thread-safe count of LLM calls made this run, surfaced in the run summary.
+LLM_CALL_COUNT = 0
+_LLM_CALL_COUNT_LOCK = threading.Lock()
 
 # Repository root assumed to be current working directory when running
 REPO_ROOT = Path(__file__).resolve().parent
@@ -79,33 +108,57 @@ def info(msg: str) -> None:
 def error(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
 
-# --- LLM wrapper + utility helpers ---
-import time
-import random
-import re
 
-# Additional env-driven config for retries, heavy-call routing and QA truncation
-MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", "5"))
-API_RETRY_BASE_DELAY = float(os.getenv("API_RETRY_BASE_DELAY", "2.0"))
-FINAL_QA_EXCERPT_CHARS = int(os.getenv("FINAL_QA_EXCERPT_CHARS", "1000"))
-HEAVY_CALL_PROVIDER = os.getenv("HEAVY_CALL_PROVIDER")
-ENABLE_CHAPTER_QA = os.getenv("ENABLE_CHAPTER_QA", "0").lower() in ("1", "true", "yes")
-ENABLE_CONFLICT_CHECK = os.getenv("ENABLE_CONFLICT_CHECK", "0").lower() in ("1", "true", "yes")
+# --- Run-wide warnings ---
+# Collected instead of hard-stopping the pipeline. Printed as a summary at the end
+# of a hands-off run (interactive_setup / cmd_build) and saved to run_warnings.json
+# in the course folder so nothing is silently lost.
+RUN_WARNINGS: List[str] = []
+
+
+def warn(msg: str) -> None:
+    RUN_WARNINGS.append(msg)
+    print(f"WARNING: {msg}", file=sys.stderr)
+
+
+def save_run_warnings(c: "Course") -> None:
+    if RUN_WARNINGS:
+        (c.path / "run_warnings.json").write_text(
+            json.dumps(RUN_WARNINGS, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+# --- Retry helper for transient API errors ---
 
 
 def _is_transient_error(exc: Exception) -> bool:
     """Heuristic: retry on server-side / rate-limit / connectivity errors, not on
-    things like bad API keys or malformed requests, which will never succeed on retry."""
+    things like bad API keys or malformed requests, which will never succeed on retry.
+    """
     msg = str(exc).lower()
     transient_markers = (
-        "500", "internal", "502", "503", "504", "unavailable",
-        "429", "rate limit", "resource_exhausted", "quota",
-        "timeout", "timed out", "deadline", "connection", "reset",
+        "500",
+        "internal",
+        "502",
+        "503",
+        "504",
+        "unavailable",
+        "429",
+        "rate limit",
+        "resource_exhausted",
+        "quota",
+        "timeout",
+        "timed out",
+        "deadline",
+        "connection",
+        "reset",
     )
     return any(marker in msg for marker in transient_markers)
 
 
-def call_with_retry(fn, max_retries: int = MAX_API_RETRIES, base_delay: float = API_RETRY_BASE_DELAY):
+def call_with_retry(
+    fn, max_retries: int = MAX_API_RETRIES, base_delay: float = API_RETRY_BASE_DELAY
+):
     """Call fn() with exponential backoff + jitter on transient errors.
     Re-raises immediately on non-transient errors, and re-raises the last error
     once retries are exhausted."""
@@ -118,11 +171,22 @@ def call_with_retry(fn, max_retries: int = MAX_API_RETRIES, base_delay: float = 
             if attempt > max_retries or not _is_transient_error(e):
                 raise
             delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
-            info(f"  Transient API error ({e}). Retrying in {delay:.1f}s... (attempt {attempt}/{max_retries})")
+            info(
+                f"  Transient API error ({e}). Retrying in {delay:.1f}s... (attempt {attempt}/{max_retries})"
+            )
             time.sleep(delay)
 
 
-def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None, provider: Optional[str] = None) -> str:
+# --- LLM wrapper ---
+
+
+def call_llm(
+    prompt: str,
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    provider: Optional[str] = None,
+) -> str:
     """Call the configured LLM provider (LLM_PROVIDER env var: 'gemini' or 'groq').
     Pass provider= to override LLM_PROVIDER for just this call (see HEAVY_CALL_PROVIDER).
 
@@ -130,9 +194,8 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
     for a quick smoke test without making external API calls.
     """
     provider = (provider or LLM_PROVIDER).lower()
-    # Count LLM calls (including dry-run) in a thread-safe manner
-    with LLM_COUNT_LOCK:
-        global LLM_CALL_COUNT
+    global LLM_CALL_COUNT
+    with _LLM_CALL_COUNT_LOCK:
         LLM_CALL_COUNT += 1
     # Deliberately NOT applying a generic model fallback here — each provider has its own
     # default model name, and leaking one provider's default into another would silently
@@ -143,17 +206,36 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
     if dry:
         low = (prompt or "").lower()
         # Terminology conflict checker canned response
-        if "terminology conflict checker" in low or "decide whether the two definitions" in low:
-            return json.dumps({"conflict": False, "reasoning": "Dry-run: assume no conflict."})
+        if (
+            "terminology conflict checker" in low
+            or "decide whether the two definitions" in low
+        ):
+            return json.dumps(
+                {"conflict": False, "reasoning": "Dry-run: assume no conflict."}
+            )
         # Outline chapter extractor canned response
         if "outline chapter extractor" in low:
-            return json.dumps({
-                "chapters": [
-                    {"number": 1, "title": "Dry-run Chapter One", "topic": "sample topic A, sample topic B"},
-                    {"number": 2, "title": "Dry-run Chapter Two", "topic": "sample topic C"},
-                    {"number": 3, "title": "Dry-run Chapter Three", "topic": "sample topic D, sample topic E"},
-                ]
-            })
+            return json.dumps(
+                {
+                    "chapters": [
+                        {
+                            "number": 1,
+                            "title": "Dry-run Chapter One",
+                            "topic": "sample topic A, sample topic B",
+                        },
+                        {
+                            "number": 2,
+                            "title": "Dry-run Chapter Two",
+                            "topic": "sample topic C",
+                        },
+                        {
+                            "number": 3,
+                            "title": "Dry-run Chapter Three",
+                            "topic": "sample topic D, sample topic E",
+                        },
+                    ]
+                }
+            )
         # Terminology extractor canned response
         if "terminology extractor" in low or "extract a compact terminology" in low:
             return json.dumps(
@@ -230,18 +312,29 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
 def _call_gemini(prompt: str, model: Optional[str], temperature: float) -> str:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY must be set to use the gemini provider")
+        raise RuntimeError(
+            "GEMINI_API_KEY or GOOGLE_API_KEY must be set to use the gemini provider"
+        )
 
-    gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "gemini-3.6-flash"
+    gmodel = (
+        model
+        or os.getenv("GEMINI_MODEL")
+        or os.getenv("LLM_MODEL")
+        or "gemini-3.6-flash"
+    )
 
     try:
         from google import genai
     except Exception as e:
-        raise RuntimeError("google-genai package not installed. Run: pip install google-genai") from e
+        raise RuntimeError(
+            "google-genai package not installed. Run: pip install google-genai"
+        ) from e
 
     try:
         client = genai.Client(api_key=api_key)
-        resp = call_with_retry(lambda: client.models.generate_content(model=gmodel, contents=prompt))
+        resp = call_with_retry(
+            lambda: client.models.generate_content(model=gmodel, contents=prompt)
+        )
     except Exception as e:
         raise RuntimeError(f"Gemini (google.genai) call failed: {e}")
 
@@ -267,11 +360,13 @@ def _call_groq(prompt: str, model: Optional[str], temperature: float) -> str:
 
     gmodel = model or os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile"
 
-    body = json.dumps({
-        "model": gmodel,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": temperature,
-    }).encode("utf-8")
+    body = json.dumps(
+        {
+            "model": gmodel,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": temperature,
+        }
+    ).encode("utf-8")
 
     def do_request() -> str:
         req = urllib.request.Request(
@@ -306,32 +401,6 @@ def _call_groq(prompt: str, model: Optional[str], temperature: float) -> str:
     except Exception as e:
         raise RuntimeError(f"Groq call failed: {e}")
 
-
-def _extract_json(text: str) -> Any:
-    """Best-effort JSON extraction from an LLM response: strips ```json fences if present,
-    and if that still doesn't parse, grabs the first balanced {...} block. Raises ValueError
-    if nothing parseable is found."""
-    t = (text or "").strip()
-    if t.startswith("```"):
-        t = t.strip("`")
-        if t.lower().startswith("json"):
-            t = t[4:]
-        t = t.strip()
-    try:
-        return json.loads(t)
-    except Exception:
-        pass
-    start = t.find("{")
-    if start != -1:
-        depth = 0
-        for i in range(start, len(t)):
-            if t[i] == "{":
-                depth += 1
-            elif t[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return json.loads(t[start:i + 1])
-    raise ValueError("No JSON object found in response")
 
 # --- File utilities ---
 
@@ -451,20 +520,23 @@ Answer with a JSON object with fields:
 
 Be conservative: if uncertain, set conflict=true.
 """
-    resp = call_llm(prompt, temperature=0.0)
-    # Try to extract JSON
     try:
-        first = resp.strip()
-        # allow the model to respond with plain 'conflict: true' or JSON. Try json loads by locating first '{'
-        if first.startswith("{"):
-            parsed = json.loads(first)
+        resp = call_llm(prompt, temperature=0.0)
+    except Exception as e:
+        # Can't verify either way. Since the caller always keeps the first definition
+        # regardless of this result, default to "no conflict" to avoid noisy false alarms.
+        return False, f"conflict check unavailable ({e}); keeping existing definition"
+    # Try to extract JSON (tolerates ```json fences or stray commentary around the object)
+    try:
+        parsed = _extract_json(resp)
+        if isinstance(parsed, dict):
             return bool(parsed.get("conflict")), parsed.get("reasoning", "")
-        # fallback simple parsing
-        lc = first.lower()
+        # fallback simple parsing on the raw text if it wasn't a JSON object at all
+        lc = resp.strip().lower()
         if "conflict" in lc and "true" in lc:
-            return True, first
+            return True, resp
         if "conflict" in lc and "false" in lc:
-            return False, first
+            return False, resp
         # otherwise be conservative
         return True, "Unclear from checker response; conservatively flagging conflict"
     except Exception:
@@ -578,13 +650,22 @@ def cmd_terminology(course_id: str) -> None:
     }
     prompt = render_prompt(terminology_template, context)
     info("Calling LLM for initial terminology extraction (cost-conscious prompt)...")
-    resp = call_llm(prompt)
+    try:
+        resp = call_llm(prompt)
+    except Exception as e:
+        # Non-fatal: chapters still declare their own terms as they're written,
+        # so a failed upfront extraction just means terminology.json starts empty.
+        warn(
+            f"Terminology extraction call failed ({e}). Continuing with empty terminology; "
+            f"terms will still be captured as chapters declare them."
+        )
+        return
     # Expect JSON list or object: try to extract JSON
     terms = {}
     try:
         # model should return JSON structure {"terms": {...}}
-        data = json.loads(resp)
-        if "terms" in data:
+        data = _extract_json(resp)
+        if isinstance(data, dict) and "terms" in data:
             terms = data["terms"]
         else:
             # allow list of entries
@@ -594,12 +675,13 @@ def cmd_terminology(course_id: str) -> None:
                     if term_key:
                         terms[term_key] = entry
     except Exception:
-        # fallback: save raw response into terminology_raw.json for inspection and fail conservatively
+        # Non-fatal: save raw response for inspection and move on with no pre-seeded terms.
         (c.path / "terminology_raw.txt").write_text(resp, encoding="utf-8")
-        error(
-            "Failed to parse terminology extractor output as JSON. Saved raw response to terminology_raw.txt"
+        warn(
+            "Failed to parse terminology extractor output as JSON. Saved raw response to "
+            "terminology_raw.txt. Continuing with empty terminology."
         )
-        sys.exit(1)
+        return
     # Merge with existing but do not overwrite
     existing = load_terminology(c.terminology_path)
     existing_terms = existing.get("terms", {})
@@ -636,16 +718,14 @@ def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
         raw = text[term_start + len("[TERMINOLOGY]") : term_end].strip()
         # try JSON
         try:
-            parsed = json.loads(raw)
+            parsed = _extract_json(raw)
             # allow {"terms": {...}}
-            if "terms" in parsed:
+            if isinstance(parsed, dict) and "terms" in parsed:
                 terms = parsed["terms"]
-            else:
+            elif isinstance(parsed, dict):
                 terms = parsed
         except Exception:
-            # try to extract lines of form key: {...}
-            # Save raw for inspection and continue
-            # Write a fallback file
+            # Non-fatal: this chapter just won't contribute new terms this round.
             terms = {}
     if chap_start != -1 and chap_end != -1:
         chapter = text[chap_start + len("[CHAPTER]") : chap_end].strip()
@@ -655,57 +735,30 @@ def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
     return terms, chapter
 
 
-def generate_chapter_content(
-    c: Course, chapter_number: int, max_retries: int = MAX_CHAPTER_RETRIES
-) -> None:
-    require_course_files(c)
-    outline = load_json(c.outline_path)
-    chapters = outline.get("chapters", [])
-    chap = next(
-        (ch for ch in chapters if int(ch.get("number")) == int(chapter_number)), None
-    )
-    if not chap:
-        raise ValueError(f"Chapter {chapter_number} not found in outline")
-    state = load_json(c.generation_state_path)
-    chapter_state = state.get("chapters", {})
-    if (
-        str(chapter_number) in chapter_state
-        and chapter_state[str(chapter_number)] == "complete"
-    ):
-        info(f"Chapter {chapter_number} already complete. Skipping.")
-        return
-    profile = c.profile_path.read_text(encoding="utf-8")
-    terminology = load_terminology(c.terminology_path)
-    terminology_json = terminology
-    chapter_writer_template = load_prompt("chapter_writer.txt")
+def _set_chapter_state(c: Course, chapter_number: int, status: str) -> None:
+    """Thread-safe read-modify-write of generation_state.json's per-chapter status."""
+    with STATE_LOCK:
+        state = load_json(c.generation_state_path)
+        state.setdefault("chapters", {})[str(chapter_number)] = status
+        save_json(c.generation_state_path, state)
 
-    attempts = 0
-    last_error = None
-    while attempts < max_retries:
-        attempts += 1
-        info(
-            f"[Attempt {attempts}/{max_retries}] Generating chapter {chapter_number} ..."
-        )
-        context = {
-            "course_profile": profile,
-            "outline_json": outline,
-            "terminology_json": terminology_json,
-            "chapter_number": chapter_number,
-            "chapter_title": chap.get("title"),
-            "chapter_topic": chap.get("topic"),
-            "source_materials": "",
-        }
-        prompt = render_prompt(chapter_writer_template, context)
-        resp = call_llm(prompt)
-        # Parse
-        proposed_terms, chapter_md = parse_generation_output(resp)
-        # Validate proposed_terms
-        conflict_found = False
-        conflict_messages: List[str] = []
+
+TERMINOLOGY_LOCK = threading.Lock()
+
+
+def _merge_chapter_terms(
+    c: Course, chapter_number: int, proposed_terms: Dict[str, Any]
+) -> int:
+    """Thread-safe: merge one chapter's proposed terms into terminology.json immediately, so
+    later chapters (even running concurrently) see the growing registry. Auto-resolves conflicts
+    by always keeping the first definition — the LLM-based check (ENABLE_CONFLICT_CHECK) only
+    changes whether that's logged as a genuine conflict or silently accepted as a restatement,
+    never which definition wins. Returns the count of newly added terms."""
+    with TERMINOLOGY_LOCK:
+        terminology_json = load_terminology(c.terminology_path)
         loaded_terms = terminology_json.get("terms", {})
-        existing_term_count = len(loaded_terms)
+        added = 0
         for term_key, term_val in proposed_terms.items():
-            # Normalize incoming
             if isinstance(term_val, str):
                 pref = term_val
                 ddef = None
@@ -720,70 +773,161 @@ def generate_chapter_content(
                 continue
             if pref in loaded_terms:
                 existing = loaded_terms[pref]
-                existing_def = existing.get("definition")
-                # If both have definitions, check for conflict
-                cflag, reasoning = definitions_conflict(existing_def, ddef)
-                if cflag:
-                    conflict_found = True
-                    conflict_messages.append(f"Term {pref} conflicts: {reasoning}")
+                if ENABLE_CONFLICT_CHECK:
+                    cflag, reasoning = definitions_conflict(
+                        existing.get("definition"), ddef
+                    )
+                    if cflag:
+                        warn(
+                            f"Chapter {chapter_number}: term '{pref}' was redefined differently "
+                            f"({reasoning}). Keeping the original definition from chapter "
+                            f"{existing.get('introduced_in')}."
+                        )
+                elif ddef and ddef != existing.get("definition"):
+                    warn(
+                        f"Chapter {chapter_number}: term '{pref}' was redefined. Keeping the "
+                        f"original definition from chapter {existing.get('introduced_in')}."
+                    )
+                # Existing definition is always kept — no overwrite either way.
             else:
-                # add new term
                 loaded_terms[pref] = {
                     "preferred_term": pref,
                     "definition": ddef,
                     "definition_status": status,
                     "introduced_in": int(chapter_number),
                 }
-        if conflict_found:
-            last_error = "; ".join(conflict_messages)
-            error(f"Terminology conflict: {last_error}")
-            # Stop generation and surface error to user
-            state["chapters"][str(chapter_number)] = "failed"
-            save_json(c.generation_state_path, state)
-            raise RuntimeError(
-                f"Terminology conflict during generation of chapter {chapter_number}: {last_error}"
-            )
-        # Save updated terminology (merge)
+                added += 1
         terminology_json["terms"] = loaded_terms
         save_terminology(c.terminology_path, terminology_json)
-        # Write draft
+        return added
+
+
+def generate_chapter_content(
+    c: Course,
+    chapter_number: int,
+    chap: Dict[str, Any],
+    total_chapters: int,
+    max_retries: int = MAX_CHAPTER_RETRIES,
+) -> Dict[str, Any]:
+    """Generates one chapter directly as LaTeX (no separate typesetting call). Thread-safe:
+    reads a fresh terminology snapshot each attempt and merges its own proposed terms back in
+    under a lock immediately after generating, so this is safe to run concurrently across
+    chapters via cmd_all's thread pool (default concurrency is 1 — see MAX_CONCURRENT_CHAPTERS).
+    Never raises for recoverable failures — returns a result dict so a batch runner can collect
+    outcomes without one chapter's failure affecting the others."""
+    title = chap.get("title") or f"Chapter {chapter_number}"
+    profile = c.profile_path.read_text(encoding="utf-8")
+    outline = load_json(c.outline_path)
+    chapter_writer_template = load_prompt("chapter_writer.txt")
+
+    attempts = 0
+    last_issues: Any = None
+    chapter_body: Optional[str] = None
+    while attempts < max_retries:
+        attempts += 1
+        info(
+            f"[chapter {chapter_number}] [Attempt {attempts}/{max_retries}] Generating ..."
+        )
+        terminology_snapshot = load_terminology(c.terminology_path)
+        context = {
+            "course_profile": profile,
+            "outline_json": outline,
+            "terminology_json": terminology_snapshot,
+            "chapter_number": chapter_number,
+            "chapter_title": chap.get("title"),
+            "chapter_topic": chap.get("topic"),
+            "source_materials": "",
+        }
+        prompt = render_prompt(chapter_writer_template, context)
+        try:
+            resp = call_llm(prompt)
+        except Exception as e:
+            last_issues = f"LLM call failed: {e}"
+            warn(
+                f"[chapter {chapter_number}] generation attempt {attempts} failed ({e})."
+            )
+            continue
+        proposed_terms, chapter_body = parse_generation_output(resp)
+        if not chapter_body.strip():
+            last_issues = "Response had no usable chapter content"
+            warn(
+                f"[chapter {chapter_number}] attempt {attempts} produced no chapter content; retrying."
+            )
+            chapter_body = None
+            continue
+
+        new_term_count = _merge_chapter_terms(c, chapter_number, proposed_terms)
+        # Save the chapter (LaTeX). Kept at drafts/chXX.md so the rest of the pipeline (state
+        # tracking, final assembly) doesn't need to change; only the content format changed.
         ch_filename = f"ch{int(chapter_number):02d}.md"
-        (c.drafts_path / ch_filename).write_text(chapter_md, encoding="utf-8")
-        info(f"Draft written to {c.drafts_path / ch_filename}")
-        # Run chapter QA
-        qa_result = run_chapter_qa(c, chapter_md)
-        # Summarize progress
-        new_term_count = len(loaded_terms) - existing_term_count
-        total_chapters = len(chapters)
-        title = chap.get("title") or f"Chapter {chapter_number}"
+        (c.drafts_path / ch_filename).write_text(chapter_body, encoding="utf-8")
+        info(
+            f"[chapter {chapter_number}] Draft written to {c.drafts_path / ch_filename}"
+        )
+
+        if not ENABLE_CHAPTER_QA:
+            info(
+                f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added"
+            )
+            _set_chapter_state(c, chapter_number, "complete")
+            return {"status": "complete", "chapter": chapter_number}
+
+        # Optional: per-chapter QA call, only if explicitly enabled.
+        try:
+            qa_result = run_chapter_qa(c, chapter_body, chapter_number)
+        except Exception as e:
+            warn(
+                f"[chapter {chapter_number}] QA call failed ({e}). Keeping the draft as generated."
+            )
+            qa_result = {
+                "status": "PASS",
+                "issues": [],
+                "warnings": [f"QA call failed: {e}"],
+            }
         if qa_result.get("status") == "PASS":
             info(
                 f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA passed"
             )
-            state["chapters"][str(chapter_number)] = "complete"
-            save_json(c.generation_state_path, state)
-            return
+            _set_chapter_state(c, chapter_number, "complete")
+            return {"status": "complete", "chapter": chapter_number}
         else:
             issues = qa_result.get("issues", [])
-            warnings = qa_result.get("warnings", [])
-            brief_issues = issues if issues else warnings
+            warnings_list = qa_result.get("warnings", [])
+            last_issues = issues if issues else warnings_list
             info(
-                f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA failed: {brief_issues}"
+                f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA flagged: {last_issues}"
             )
-            error(f"Chapter QA failed: {issues}")
-            last_error = str(issues)
-            # Leave draft intact, mark failed and retry if possible
-            state["chapters"][str(chapter_number)] = "failed"
-            save_json(c.generation_state_path, state)
-    # After retries
-    raise RuntimeError(f"Chapter {chapter_number} generation failed after {attempts} attempts: {last_error}")
+            _set_chapter_state(c, chapter_number, "failed")
+            # loop retries if attempts remain
 
-def run_chapter_qa(c: Course, chapter_markdown: str, terminology_override: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    # Retries exhausted: never kill the run. Keep whatever we have and move on.
+    if chapter_body:
+        warn(
+            f"[chapter {chapter_number}] did not pass QA after {attempts} attempts ({last_issues}). "
+            f"Keeping the last draft and moving on."
+        )
+        _set_chapter_state(c, chapter_number, "complete_with_warnings")
+        return {"status": "complete_with_warnings", "chapter": chapter_number}
+    else:
+        warn(
+            f"[chapter {chapter_number}] could not be generated after {attempts} attempts ({last_issues}). "
+            f"No draft available — it will be skipped when assembling the final document."
+        )
+        _set_chapter_state(c, chapter_number, "failed")
+        return {
+            "status": "failed",
+            "chapter": chapter_number,
+            "error": str(last_issues),
+        }
+
+
+def run_chapter_qa(
+    c: Course, chapter_markdown: str, chapter_number: Optional[int] = None
+) -> Dict[str, Any]:
     template = load_prompt("chapter_qa.txt")
     outline = load_json(c.outline_path)
     profile = c.profile_path.read_text(encoding="utf-8")
-    # Use provided terminology snapshot when available to keep QA consistent during concurrent generation
-    terminology = terminology_override if terminology_override is not None else load_terminology(c.terminology_path)
+    terminology = load_terminology(c.terminology_path)
     context = {
         "course_profile": profile,
         "outline_json": outline,
@@ -794,104 +938,19 @@ def run_chapter_qa(c: Course, chapter_markdown: str, terminology_override: Optio
     resp = call_llm(prompt, temperature=0.0)
     # Expect JSON object
     try:
-        parsed = json.loads(resp)
+        parsed = _extract_json(resp)
+        if not isinstance(parsed, dict):
+            raise ValueError("QA response was not a JSON object")
         return parsed
     except Exception:
-        # Save raw
-        (c.path / "chapter_qa_raw.txt").write_text(resp, encoding="utf-8")
-        error(
-            "Failed to parse chapter QA response as JSON. Saved raw output to chapter_qa_raw.txt"
+        # Save raw — suffixed per-chapter so concurrent chapters don't clobber each other's debug file.
+        suffix = f"_ch{chapter_number:02d}" if chapter_number else ""
+        (c.path / f"chapter_qa_raw{suffix}.txt").write_text(resp, encoding="utf-8")
+        warn(
+            f"Failed to parse chapter QA response as JSON. Saved raw output to chapter_qa_raw{suffix}.txt"
         )
         return {"status": "FAIL", "issues": ["Invalid QA response format"]}
 
-
-def generate_chapter_worker(c: Course, chapter_number: int, terminology_snapshot: Dict[str, Any], max_retries: int = MAX_CHAPTER_RETRIES) -> Dict[str, Any]:
-    """Worker for concurrent chapter generation.
-
-    Uses an immutable terminology_snapshot for the duration of generation and does NOT mutate the shared terminology file.
-    On success writes draft, saves proposed terms to proposals/, and marks chapter complete in generation_state.json.
-    On failure leaves draft (if any) and marks chapter failed.
-    Returns a dict with keys: status: 'success'|'failed'|'skipped', proposed_terms (when success), error (when failed)
-    """
-    require_course_files(c)
-    outline = load_json(c.outline_path)
-    chapters = outline.get("chapters", [])
-    chap = next((ch for ch in chapters if int(ch.get("number")) == int(chapter_number)), None)
-    if not chap:
-        return {"status": "failed", "error": f"Chapter {chapter_number} not found in outline"}
-    # Check existing state
-    with STATE_LOCK:
-        state = load_json(c.generation_state_path)
-        chapter_state = state.get("chapters", {})
-        if str(chapter_number) in chapter_state and chapter_state[str(chapter_number)] == "complete":
-            info(f"[chapter {chapter_number}] already complete. Skipping.")
-            return {"status": "skipped"}
-    profile = c.profile_path.read_text(encoding="utf-8")
-    chapter_writer_template = load_prompt("chapter_writer.txt")
-
-    attempts = 0
-    last_error = None
-    while attempts < max_retries:
-        attempts += 1
-        info(f"[chapter {chapter_number}] [Attempt {attempts}/{max_retries}] started")
-        context = {
-            "course_profile": profile,
-            "outline_json": outline,
-            "terminology_json": terminology_snapshot,
-            "chapter_number": chapter_number,
-            "chapter_title": chap.get("title"),
-            "chapter_topic": chap.get("topic"),
-            "source_materials": ""
-        }
-        prompt = render_prompt(chapter_writer_template, context)
-        try:
-            resp = call_llm(prompt)
-        except Exception as e:
-            last_error = str(e)
-            error(f"[chapter {chapter_number}] LLM error: {e}")
-            # mark failed and continue retry
-            with STATE_LOCK:
-                state = load_json(c.generation_state_path)
-                state.setdefault("chapters", {})[str(chapter_number)] = "failed"
-                save_json(c.generation_state_path, state)
-            continue
-        proposed_terms, chapter_md = parse_generation_output(resp)
-        # Write draft
-        ch_filename = f"ch{int(chapter_number):02d}.md"
-        (c.drafts_path / ch_filename).write_text(chapter_md, encoding="utf-8")
-        info(f"[chapter {chapter_number}] Draft written to {c.drafts_path / ch_filename}")
-        # Run chapter QA using the snapshot terminology if enabled
-        if ENABLE_CHAPTER_QA:
-            qa_result = run_chapter_qa(c, chapter_md, terminology_override=terminology_snapshot)
-        else:
-            qa_result = {"status": "PASS", "issues": [], "warnings": []}
-        if qa_result.get("status") == "PASS":
-            # Save proposed terms to proposals folder for later reconciliation
-            proposals_dir = c.path / "proposals"
-            proposals_dir.mkdir(parents=True, exist_ok=True)
-            save_json(proposals_dir / f"ch{int(chapter_number):02d}.json", proposed_terms)
-            # Mark complete in generation state
-            with STATE_LOCK:
-                state = load_json(c.generation_state_path)
-                state.setdefault("chapters", {})[str(chapter_number)] = "complete"
-                save_json(c.generation_state_path, state)
-            info(f"[chapter {chapter_number}] completed — Chapter QA passed")
-            return {"status": "success", "proposed_terms": proposed_terms}
-        else:
-            issues = qa_result.get("issues", [])
-            warnings = qa_result.get("warnings", [])
-            brief_issues = issues if issues else warnings
-            info(f"[chapter {chapter_number}] Chapter QA failed: {brief_issues}")
-            error(f"[chapter {chapter_number}] Chapter QA failed: {issues}")
-            last_error = str(issues)
-            # Mark failed in state and retry if attempts remain
-            with STATE_LOCK:
-                state = load_json(c.generation_state_path)
-                state.setdefault("chapters", {})[str(chapter_number)] = "failed"
-                save_json(c.generation_state_path, state)
-            # continue loop for retry
-    # After retries exhausted
-    return {"status": "failed", "error": f"Chapter {chapter_number} generation failed after {attempts} attempts: {last_error}"}
 
 def cmd_chapter(course_id: str, chapter_number: int) -> None:
     c = Course.load(course_id)
@@ -899,59 +958,23 @@ def cmd_chapter(course_id: str, chapter_number: int) -> None:
         error("Course not found. Run 'init' first.")
         sys.exit(1)
     try:
-        generate_chapter_content(c, chapter_number)
+        require_course_files(c)
+        outline = load_json(c.outline_path)
+        chapters = outline.get("chapters", [])
+        chap = next(
+            (ch for ch in chapters if int(ch.get("number")) == int(chapter_number)),
+            None,
+        )
+        if not chap:
+            error(f"Chapter {chapter_number} not found in outline.json")
+            sys.exit(1)
+        result = generate_chapter_content(c, chapter_number, chap, len(chapters))
     except Exception as e:
         error(str(e))
         sys.exit(1)
-
-def reconcile_proposals(c: Course, chapter_numbers_in_order: List[int]) -> Dict[str, Any]:
-    """Merge per-chapter proposals deterministically in chapter order.
-
-    Strategy: keep first definition encountered; log conflicts; do not call LLM during merge.
-    """
-    existing = load_terminology(c.terminology_path)
-    existing_terms = existing.get("terms", {})
-    conflicts = []
-    proposals_dir = c.path / "proposals"
-    for num in sorted(chapter_numbers_in_order):
-        prop_file = proposals_dir / f"ch{int(num):02d}.json"
-        if not prop_file.exists():
-            continue
-        try:
-            proposed = load_json(prop_file)
-        except Exception:
-            error(f"Failed to load proposal file: {prop_file}")
-            continue
-        # proposed is expected to be a dict of terms
-        for term_key, term_val in proposed.items():
-            # normalize incoming
-            if isinstance(term_val, str):
-                pref = term_val
-                ddef = None
-                status = "undefined"
-            elif isinstance(term_val, dict):
-                pref = term_val.get("preferred_term") or term_key
-                ddef = term_val.get("definition")
-                status = term_val.get("definition_status") or ("defined" if ddef else "undefined")
-            else:
-                continue
-            if pref in existing_terms:
-                existing_def = existing_terms[pref].get("definition")
-                # deterministic check: if definitions differ (string compare), record conflict and keep existing (first)
-                if (existing_def or "") != (ddef or ""):
-                    conflicts.append({"term": pref, "existing": existing_def, "proposed": ddef, "from_chapter": num})
-                    info(f"[terminology] Conflict for term '{pref}' from chapter {num}; keeping existing definition.")
-                # else identical -> nothing to do
-            else:
-                existing_terms[pref] = {
-                    "preferred_term": pref,
-                    "definition": ddef,
-                    "definition_status": status,
-                    "introduced_in": int(num)
-                }
-    existing["terms"] = existing_terms
-    save_terminology(c.terminology_path, existing)
-    return {"conflicts": conflicts, "merged_terms": len(existing_terms)}
+    if result.get("status") == "failed":
+        error(f"Chapter {chapter_number} failed: {result.get('error')}")
+        sys.exit(1)
 
 
 def cmd_all(course_id: str) -> None:
@@ -960,66 +983,41 @@ def cmd_all(course_id: str) -> None:
     outline = load_json(c.outline_path)
     chapters = outline.get("chapters", [])
     total = len(chapters)
-    info(f"[batch] Generating missing chapters for {course_id} ({total} chapters in outline) with concurrency={MAX_CONCURRENT_CHAPTERS}")
-    # Determine chapters that need generation
     state = load_json(c.generation_state_path)
     chapter_state = state.get("chapters", {})
-    to_generate: List[int] = []
-    skipped: List[int] = []
-    for ch in chapters:
-        num = int(ch.get("number"))
-        if str(num) in chapter_state and chapter_state[str(num)] == "complete":
-            skipped.append(num)
-        else:
-            to_generate.append(num)
-    info(f"[batch] {len(to_generate)} chapters to generate; {len(skipped)} chapters already complete and skipped")
+    to_generate = [
+        ch
+        for ch in chapters
+        if chapter_state.get(str(int(ch.get("number"))))
+        not in ("complete", "complete_with_warnings")
+    ]
+    already_done = total - len(to_generate)
+    if already_done:
+        info(f"{already_done} chapter(s) already complete, skipping.")
     if not to_generate:
         info("No chapters need generation.")
         return
-    # Load canonical terminology snapshot once for the whole batch
-    terminology_snapshot = load_terminology(c.terminology_path)
-    # Ensure proposals dir exists
-    proposals_dir = c.path / "proposals"
-    proposals_dir.mkdir(parents=True, exist_ok=True)
-    # Start worker pool
-    results: Dict[int, Dict[str, Any]] = {}
-    info(f"[batch] Submitting {len(to_generate)} chapter generation tasks (concurrency={MAX_CONCURRENT_CHAPTERS})")
+    info(
+        f"Generating {len(to_generate)} chapter(s) for {course_id} "
+        f"(concurrency={MAX_CONCURRENT_CHAPTERS})"
+    )
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_CHAPTERS) as ex:
-        future_map = {ex.submit(generate_chapter_worker, c, num, terminology_snapshot): num for num in to_generate}
+        future_map = {
+            ex.submit(
+                generate_chapter_content, c, int(ch.get("number")), ch, total
+            ): int(ch.get("number"))
+            for ch in to_generate
+        }
         for fut in as_completed(future_map):
             num = future_map[fut]
             try:
-                res = fut.result()
-                results[num] = res
-                if res.get("status") == "success":
-                    info(f"[chapter {num}] completed")
-                elif res.get("status") == "skipped":
-                    info(f"[chapter {num}] skipped")
-                else:
-                    error(f"[chapter {num}] failed: {res.get('error')}")
+                fut.result()
             except Exception as e:
-                results[num] = {"status": "failed", "error": str(e)}
-                error(f"[chapter {num}] failed with exception: {e}")
-    # Reconcile terminology deterministically in chapter order using proposals for successfully generated chapters
-    successful = [n for n, r in results.items() if r.get("status") == "success"]
-    successful_sorted = sorted(successful)
-    info(f"[batch] Reconciling terminology from {len(successful_sorted)} generated chapters")
-    recon = reconcile_proposals(c, successful_sorted)
-    info(f"[batch] Terminology reconciliation complete. {len(recon.get('conflicts', []))} conflicts logged. Total terms now: {recon.get('merged_terms')}")
-    # Summarize batch
-    succeeded = [n for n, r in results.items() if r.get("status") == "success"]
-    failed = [n for n, r in results.items() if r.get("status") == "failed"]
-    skipped_during = [n for n, r in results.items() if r.get("status") == "skipped"]
-    info("[batch] Generation summary:")
-    info(f"  - requested: {len(to_generate)}")
-    info(f"  - succeeded: {len(succeeded)} -> {succeeded}")
-    info(f"  - failed: {len(failed)} -> {failed}")
-    info(f"  - skipped (already complete): {len(skipped)} -> {skipped_during}")
-    info(f"  - LLM calls this run: {LLM_CALL_COUNT}")
-    # If any failed, surface error and exit non-zero to preserve previous behavior
-    if failed:
-        error(f"One or more chapters failed: {failed}")
-        sys.exit(1)
+                # generate_chapter_content shouldn't raise for recoverable failures, but if
+                # something unexpected slips through, don't let it kill the other chapters.
+                warn(
+                    f"Chapter {num} raised an unexpected error ({e}). Skipping and continuing."
+                )
     info("All chapters generation finished (or were already complete).")
 
 
@@ -1029,21 +1027,39 @@ def cmd_all(course_id: str) -> None:
 def cmd_qa(course_id: str) -> None:
     c = Course.load(course_id)
     require_course_files(c)
-    # assemble final course markdown
+    # assemble final course markdown (this is the real, complete deliverable — untouched below)
     outline = load_json(c.outline_path)
     chapters = outline.get("chapters", [])
     final_md = []
+    qa_excerpt_md = []
+    included = 0
     for ch in chapters:
         fname = c.drafts_path / f"ch{int(ch.get('number')):02d}.md"
         if not fname.exists():
-            error(f"Missing chapter draft: {fname}. Run chapter generation first.")
-            sys.exit(1)
+            warn(
+                f"Missing chapter draft: {fname}. Excluding chapter {ch.get('number')} from the final document."
+            )
+            continue
         text = fname.read_text(encoding="utf-8")
         final_md.append(f"# Chapter {ch.get('number')}: {ch.get('title')}\n\n")
         final_md.append(text)
         final_md.append("\n\n")
+        # For the QA call only: a bounded excerpt, not the full chapter. Full text scales with
+        # course length and will eventually exceed any free-tier per-minute token budget — the
+        # excerpt still lets the model judge terminology use, tone, and coverage per chapter.
+        excerpt = text[:FINAL_QA_EXCERPT_CHARS]
+        if len(text) > FINAL_QA_EXCERPT_CHARS:
+            excerpt += "\n...[chapter truncated for this QA pass; the full chapter is complete in final_course.md]..."
+        qa_excerpt_md.append(
+            f"# Chapter {ch.get('number')}: {ch.get('title')}\n\n{excerpt}\n\n"
+        )
+        included += 1
     final_content = "\n".join(final_md)
     (c.final_path / "final_course.md").write_text(final_content, encoding="utf-8")
+    if included == 0:
+        warn("No chapter drafts were available to assemble. Skipping final QA.")
+        return
+    qa_content = "\n".join(qa_excerpt_md)
     # Run final QA prompt
     template = load_prompt("final_qa.txt")
     terminology = load_terminology(c.terminology_path)
@@ -1052,52 +1068,80 @@ def cmd_qa(course_id: str) -> None:
         "course_profile": profile,
         "outline_json": outline,
         "terminology_json": terminology,
-        "final_course_markdown": final_content,
+        "final_course_markdown": qa_content,
     }
     prompt = render_prompt(template, context)
     info("Running final course QA. This may be a longer call.")
-    resp = call_llm(prompt, temperature=0.0)
+    state = load_json(c.generation_state_path)
+    heavy_provider = os.getenv("HEAVY_CALL_PROVIDER") or LLM_PROVIDER
     try:
-        report = json.loads(resp)
+        resp = call_llm(prompt, temperature=0.0, provider=heavy_provider)
+    except Exception as e:
+        warn(
+            f"Final QA call failed ({e}). Proceeding to compile without a final QA report."
+        )
+        state["final_qa"] = True
+        state["final_qa_passed"] = None
+        save_json(c.generation_state_path, state)
+        return
+    try:
+        report = _extract_json(resp)
+        if not isinstance(report, dict):
+            raise ValueError("Final QA response was not a JSON object")
         (c.final_path / "final_qa.json").write_text(
             json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         status = report.get("status", "FAIL")
+        state["final_qa"] = True
+        state["final_qa_passed"] = status == "PASS"
+        save_json(c.generation_state_path, state)
         if status != "PASS":
-            error(f"Final QA failed: {report.get('critical_issues', [])}")
-            sys.exit(1)
+            warn(
+                f"Final QA flagged issues (proceeding anyway): {report.get('critical_issues', [])}"
+            )
         else:
             info("Final QA passed.")
-            state = load_json(c.generation_state_path)
-            state["final_qa"] = True
-            save_json(c.generation_state_path, state)
     except Exception:
         (c.final_path / "final_qa_raw.txt").write_text(resp, encoding="utf-8")
-        error(
-            "Failed to parse final QA response as JSON. Saved raw output to final_qa_raw.txt"
+        warn(
+            "Failed to parse final QA response as JSON. Saved raw output to final_qa_raw.txt. Proceeding to compile."
         )
-        sys.exit(1)
+        state["final_qa"] = True
+        state["final_qa_passed"] = None
+        save_json(c.generation_state_path, state)
 
 
 # Typesetting: ask LLM to convert markdown chapter into LaTeX chapter file according to rules.
 
 
-def typeset_chapter(c: Course, chapter_number: int) -> None:
+def _looks_like_latex(text: str) -> bool:
+    """Detects whether a draft is already LaTeX (written directly by the current
+    chapter_writer.txt) vs. old-style Markdown from before that change."""
+    head = text.strip()[:300]
+    return bool(re.search(r"\\(chapter|section)\s*\{", head))
+
+
+def typeset_chapter(c: Course, chapter_number: int) -> bool:
+    """Returns True if a .tex file was written for this chapter, False if it had to be skipped."""
+    texfile = c.tex_path / f"ch{int(chapter_number):02d}.tex"
+    if texfile.exists():
+        info(f"Chapter {chapter_number} already typeset. Skipping (no LLM call).")
+        return True
     fname = c.drafts_path / f"ch{int(chapter_number):02d}.md"
     if not fname.exists():
-        raise FileNotFoundError(f"Draft not found: {fname}")
-    md = fname.read_text(encoding="utf-8")
-    # If the draft already appears to be LaTeX, skip typesetting LLM call and write directly
-    looks_like_latex = False
-    sample = md.strip()[:200]
-    if sample.startswith("\\") or "\\chapter{" in md or "\\section{" in md or "\\begin{" in md:
-        looks_like_latex = True
-    texfile = c.tex_path / f"ch{int(chapter_number):02d}.tex"
-    if looks_like_latex:
-        texfile.write_text(md, encoding="utf-8")
-        info(f"Draft appears to be LaTeX; copied directly to {texfile}")
-        return
-    # Otherwise run typesetter LLM
+        warn(f"No draft for chapter {chapter_number}; skipping it in the compiled PDF.")
+        return False
+    draft_content = fname.read_text(encoding="utf-8")
+
+    if _looks_like_latex(draft_content):
+        # Chapter was already written directly as LaTeX — just place it, no LLM call needed.
+        c.tex_path.mkdir(parents=True, exist_ok=True)
+        texfile.write_text(draft_content, encoding="utf-8")
+        info(f"Wrote LaTeX chapter {texfile} (no LLM call — chapter was already LaTeX)")
+        return True
+
+    # Fallback for older Markdown drafts (from before chapters were written directly as LaTeX):
+    # one LLM call to convert, same as the original pipeline. One-time cost per such chapter.
     template = load_prompt("typesetter.txt")
     outline = load_json(c.outline_path)
     chap = next(
@@ -1111,14 +1155,25 @@ def typeset_chapter(c: Course, chapter_number: int) -> None:
     context = {
         "chapter_number": chapter_number,
         "chapter_title": chap.get("title") if chap else f"Chapter {chapter_number}",
-        "chapter_markdown": md,
+        "chapter_markdown": draft_content,
         "terminology_json": load_terminology(c.terminology_path),
     }
     prompt = render_prompt(template, context)
-    resp = call_llm(prompt, temperature=0.0)
-    # Expect LaTeX content (no documentclass or begin/end document)
+    try:
+        resp = call_llm(
+            prompt,
+            temperature=0.0,
+            provider=os.getenv("HEAVY_CALL_PROVIDER") or LLM_PROVIDER,
+        )
+    except Exception as e:
+        warn(
+            f"Typesetting chapter {chapter_number} failed ({e}). Skipping it in the compiled PDF "
+            f"(the markdown draft is still available at {fname})."
+        )
+        return False
     texfile.write_text(resp, encoding="utf-8")
     info(f"Wrote LaTeX chapter {texfile}")
+    return True
 
 
 def cmd_compile(course_id: str) -> None:
@@ -1126,14 +1181,21 @@ def cmd_compile(course_id: str) -> None:
     require_course_files(c)
     state = load_json(c.generation_state_path)
     if not state.get("final_qa"):
-        error("Final QA not completed. Run 'qa' before compiling.")
-        sys.exit(1)
-    # Typeset all chapters
+        warn("Final QA wasn't run before compiling. Proceeding anyway.")
+    # Typeset all chapters; collect which ones actually produced a .tex file.
     outline = load_json(c.outline_path)
     chapters = outline.get("chapters", [])
+    typeset_ok: List[Dict[str, Any]] = []
     for ch in chapters:
-        typeset_chapter(c, int(ch.get("number")))
-    # Create main.tex
+        if typeset_chapter(c, int(ch.get("number"))):
+            typeset_ok.append(ch)
+    if not typeset_ok:
+        warn(
+            "No chapters could be typeset to LaTeX. No PDF will be produced this run — your "
+            f"chapter drafts are still available as markdown in {c.drafts_path}."
+        )
+        return
+    # Create main.tex (only for chapters that were successfully typeset)
     main = []
     main.append("\\documentclass[12pt]{report}\n")
     main.append("\\usepackage[a4paper,margin=1in]{geometry}\n")
@@ -1151,13 +1213,18 @@ def cmd_compile(course_id: str) -> None:
     main.append(f"\\Huge\\textbf{{{title}}}\\\\\n")
     main.append("\\vspace{1cm}\n\\end{titlepage}\n\\tableofcontents\n\\newpage\n")
     # Inputs
-    for ch in chapters:
+    for ch in typeset_ok:
         fname = f"tex/ch{int(ch.get('number')):02d}.tex"
         main.append(f"\\input{{{fname}}}\n")
     main.append("\\end{document}\n")
     main_tex_path = c.path / "main.tex"
     main_tex_path.write_text("".join(main), encoding="utf-8")
     info(f"Wrote main.tex at {main_tex_path}")
+    if len(typeset_ok) < len(chapters):
+        warn(
+            f"Only {len(typeset_ok)}/{len(chapters)} chapters made it into the PDF; "
+            f"the rest are still available as markdown/tex where they got to."
+        )
     # Respect DRY_RUN: skip actual pdflatex and write a placeholder PDF
     if os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes"):
         placeholder = c.output_pdf
@@ -1167,20 +1234,38 @@ def cmd_compile(course_id: str) -> None:
         state["compiled"] = True
         save_json(c.generation_state_path, state)
         return
-    # Run pdflatex twice in course dir
+    # Run pdflatex twice in course dir. pdflatex in -interaction=nonstopmode typically still
+    # emits a PDF even when it hits recoverable errors, so we don't bail on a non-zero return
+    # code alone — we check whether main.pdf actually exists afterward.
     old_cwd = os.getcwd()
     try:
         os.chdir(c.path)
         cmd = ["pdflatex", "-interaction=nonstopmode", "main.tex"]
+        pdflatex_missing = False
         for i in range(2):
             info(f"Running LaTeX pass {i+1}...")
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                res = subprocess.run(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                )
+            except FileNotFoundError:
+                warn(
+                    "'pdflatex' isn't installed or isn't on PATH, so the PDF can't be compiled. "
+                    "Install a LaTeX distribution (e.g. MiKTeX on Windows, TeX Live on macOS/Linux) "
+                    f"to compile it yourself later — your LaTeX source is ready at {main_tex_path}."
+                )
+                pdflatex_missing = True
+                break
             if res.returncode != 0:
                 (c.path / "latex_error.log").write_bytes(
                     res.stdout + b"\n\n" + res.stderr
                 )
-                error("LaTeX compilation failed. See latex_error.log in course folder.")
-                sys.exit(1)
+                warn(
+                    f"LaTeX pass {i+1} reported errors (see latex_error.log). Continuing to check "
+                    f"whether a PDF was still produced."
+                )
+        if pdflatex_missing:
+            return
         # Move output to output.pdf
         built = c.path / "main.pdf"
         if built.exists():
@@ -1189,26 +1274,58 @@ def cmd_compile(course_id: str) -> None:
             state["compiled"] = True
             save_json(c.generation_state_path, state)
         else:
-            error("main.pdf not found after compilation")
-            sys.exit(1)
+            warn(
+                f"pdflatex did not produce a PDF. See latex_error.log in {c.path}. "
+                f"Your LaTeX source is still available at {main_tex_path} to fix and compile manually."
+            )
     finally:
         os.chdir(old_cwd)
 
 
 def cmd_build(course_id: str) -> None:
-    c = Course.load(course_id)
-    require_course_files(c)
-    # Run terminology if empty
-    terminology = load_terminology(c.terminology_path)
-    if not terminology.get("terms"):
-        info("Running initial terminology extraction...")
-        cmd_terminology(course_id)
-    # Generate all missing chapters
-    cmd_all(course_id)
-    # Final QA
-    cmd_qa(course_id)
-    # Compile
-    cmd_compile(course_id)
+    run_pipeline(course_id)
+
+
+def print_run_summary(c: Course) -> None:
+    """Hands-off runs never hard-stop, so this is the one place that tells you what you
+    actually got: a PDF, a LaTeX source fallback, or markdown drafts — plus any warnings.
+    """
+    save_run_warnings(c)
+    state = load_json(c.generation_state_path)
+    chapters_state = state.get("chapters", {})
+    outline_chapters = load_json(c.outline_path).get("chapters", [])
+    total = len(outline_chapters)
+    complete = sum(
+        1
+        for v in chapters_state.values()
+        if v in ("complete", "complete_with_warnings")
+    )
+    with_warnings = sum(
+        1 for v in chapters_state.values() if v == "complete_with_warnings"
+    )
+    print("\n" + "─" * 50)
+    print("Run summary")
+    print("─" * 50)
+    suffix = f" ({with_warnings} with QA warnings)" if with_warnings else ""
+    print(f"Chapters generated: {complete}/{total}{suffix}")
+    print(f"LLM calls made this run: {LLM_CALL_COUNT}")
+    if state.get("compiled") and c.output_pdf.exists():
+        print(f"PDF ready:   {c.output_pdf}")
+    elif (c.path / "main.tex").exists():
+        print("PDF compile didn't complete, but LaTeX source is ready:")
+        print(f"   {c.path / 'main.tex'}")
+        print(f"   {c.tex_path} (per-chapter .tex files)")
+    else:
+        print("No PDF or .tex output this run. Markdown drafts are available:")
+        print(f"   {c.drafts_path}")
+    if RUN_WARNINGS:
+        print(f"\n{len(RUN_WARNINGS)} warning(s) were recorded:")
+        for w in RUN_WARNINGS[:10]:
+            print(f"   - {w}")
+        if len(RUN_WARNINGS) > 10:
+            print(f"   ... and {len(RUN_WARNINGS) - 10} more.")
+        print(f"Full list saved to {c.path / 'run_warnings.json'}")
+    print("─" * 50)
 
 
 # --- Interactive mode and CLI ---
@@ -1226,8 +1343,9 @@ def format_course_dir_name(course_code: str, course_title: str) -> str:
     return name
 
 
-def parse_outline_text_to_chapters(text: str) -> List[Dict[str, Any]]:
-    # Heuristic parsing: look for lines starting with 'Chapter' or numeric headings or markdown headings
+def parse_outline_text_to_chapters_heuristic(text: str) -> List[Dict[str, Any]]:
+    # Regex-based fallback only. Used when the LLM-based extractor (the primary path) is
+    # unavailable or fails to parse. See parse_outline_text_to_chapters_llm below.
     chapters: List[Dict[str, Any]] = []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     chapter_re = re.compile(r"^(?:Chapter\s+)?(\d{1,3})[:\.)\s-]*(.*)$", re.IGNORECASE)
@@ -1279,6 +1397,106 @@ def parse_outline_text_to_chapters(text: str) -> List[Dict[str, Any]]:
     return unique
 
 
+def _extract_json(text: str) -> Any:
+    """Best-effort JSON extraction from an LLM response: strips ```json fences if present,
+    and if that still doesn't parse, grabs the first balanced {...} block. Raises ValueError
+    if nothing parseable is found."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+    start = t.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(t)):
+            if t[i] == "{":
+                depth += 1
+            elif t[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(t[start : i + 1])
+    raise ValueError("No JSON object found in response")
+
+
+def parse_outline_text_to_chapters_llm(text: str) -> List[Dict[str, Any]]:
+    """Primary outline parser. Pasted/uploaded course outlines arrive in wildly inconsistent
+    shapes — one unbroken paragraph, bullet lists, numbered learning outcomes mixed in with
+    course content, headings, etc. — and no regex reliably handles all of that. This asks the
+    model to read the raw text the way a human would and segment it into a sensible chapter
+    list, distinguishing actual teachable content from things like numbered learning outcomes.
+    Falls back to the regex heuristic if the call or the parse fails, so outline parsing itself
+    is never a hard stop."""
+    prompt = f"""You are an outline chapter extractor for a university course lecture-note generator.
+
+You will be given raw, possibly badly formatted, pasted course outline or syllabus text (it may
+have no line breaks, run-on sentences, or mixed sections). Your job is to identify the actual
+TEACHABLE CHAPTERS the lecture notes should be organized into.
+
+Course outlines typically mix together things like:
+- Learning Outcomes (a numbered list of things students should be able to do) — these describe
+  goals, NOT chapters. Do not turn each learning outcome into its own chapter.
+- Course Contents / Course Description (the actual topics to be taught) — this is what chapters
+  should be built from.
+
+Break the taught content into a logical sequence of chapters. Group closely related short topics
+into one chapter; split large topic lists into multiple chapters where they're distinct enough to
+teach separately. Order chapters in a sensible teaching sequence (foundational topics first).
+
+Respond with ONLY a JSON object, no markdown fences, no commentary, in exactly this shape:
+{{
+  "chapters": [
+    {{"number": 1, "title": "Short chapter title", "topic": "Comma-separated subtopics this chapter covers"}},
+    {{"number": 2, "title": "...", "topic": "..."}}
+  ]
+}}
+
+Raw outline text:
+---
+{text}
+---
+"""
+    try:
+        resp = call_llm(prompt, temperature=0.0)
+        data = _extract_json(resp)
+        chapters_raw = data.get("chapters") if isinstance(data, dict) else None
+        if not isinstance(chapters_raw, list) or not chapters_raw:
+            raise ValueError("Response had no usable 'chapters' array")
+        chapters: List[Dict[str, Any]] = []
+        for i, ch in enumerate(chapters_raw, start=1):
+            if not isinstance(ch, dict):
+                continue
+            try:
+                num = int(ch.get("number"))
+            except (TypeError, ValueError):
+                num = i
+            title = str(ch.get("title") or f"Chapter {num}").strip() or f"Chapter {num}"
+            topic = str(ch.get("topic") or "").strip()
+            chapters.append({"number": num, "title": title, "topic": topic})
+        # De-dupe/sort in case the model skipped or repeated numbers
+        seen = set()
+        unique: List[Dict[str, Any]] = []
+        for ch in sorted(chapters, key=lambda c: c["number"]):
+            if ch["number"] in seen:
+                continue
+            seen.add(ch["number"])
+            unique.append(ch)
+        if not unique:
+            raise ValueError("Chapter list was empty after normalization")
+        return unique
+    except Exception as e:
+        warn(
+            f"LLM-based outline parsing failed ({e}); falling back to basic text parsing. "
+            f"Check outline.json afterward — the chapter list may need manual adjustment."
+        )
+        return parse_outline_text_to_chapters_heuristic(text)
+
+
 def parse_outline_file(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Outline file not found: {path}")
@@ -1317,7 +1535,7 @@ def parse_outline_file(path: Path) -> Dict[str, Any]:
     else:
         # attempt to read as text
         text = path.read_text(encoding="utf-8", errors="ignore")
-    chapters = parse_outline_text_to_chapters(text)
+    chapters = parse_outline_text_to_chapters_llm(text)
     outline = {
         "course_code": "",
         "course_title": "",
@@ -1356,6 +1574,21 @@ def write_course_profile_from_metadata(path: Path, metadata: Dict[str, Any]) -> 
     path.write_text(template, encoding="utf-8")
 
 
+def run_pipeline(course_dir_name: str) -> str:
+    """Runs terminology -> all chapters -> final QA -> compile for an existing course
+    folder, hands-off, then prints the run summary. Used for both fresh and resumed courses.
+    """
+    c = Course.load(course_dir_name)
+    terminology = load_terminology(c.terminology_path)
+    if not terminology.get("terms"):
+        cmd_terminology(course_dir_name)
+    cmd_all(course_dir_name)
+    cmd_qa(course_dir_name)
+    cmd_compile(course_dir_name)
+    print_run_summary(c)
+    return course_dir_name
+
+
 def interactive_setup() -> str:
     # Welcome box
     print("╭" + "─" * 42 + "╮")
@@ -1373,7 +1606,9 @@ def interactive_setup() -> str:
                     st = load_json(state_file)
                     chapters = st.get("chapters", {})
                     total_complete = sum(
-                        1 for v in chapters.values() if v == "complete"
+                        1
+                        for v in chapters.values()
+                        if v in ("complete", "complete_with_warnings")
                     )
                     if chapters and total_complete < max(1, len(chapters)):
                         incomplete.append((p.name, total_complete, len(chapters)))
@@ -1388,7 +1623,11 @@ def interactive_setup() -> str:
             sel = input("Enter the number of the course to resume: ").strip()
             try:
                 idx = int(sel) - 1
-                return incomplete[idx][0]
+                resume_id = incomplete[idx][0]
+                print(
+                    f"\nResuming {resume_id} — this runs straight through to the end.\n"
+                )
+                return run_pipeline(resume_id)
             except Exception:
                 print("Invalid selection; starting a new course.")
     # New course setup
@@ -1504,7 +1743,7 @@ def interactive_setup() -> str:
             "university": "",
             "academic_session": "",
             "level": "",
-            "chapters": parse_outline_text_to_chapters(outline_text or ""),
+            "chapters": parse_outline_text_to_chapters_llm(outline_text or ""),
         }
     # populate metadata
     parsed_outline["course_code"] = course_code
@@ -1546,33 +1785,10 @@ def interactive_setup() -> str:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(source_materials, dest / source_materials.name)
     print("\nCourse initialized\n")
-    # Run initial terminology extraction
-    try:
-        cmd_terminology(course_dir_name)
-    except Exception as e:
-        error(f"Initial terminology extraction failed: {e}")
-        sys.exit(1)
-    # Generate all chapters
-    try:
-        cmd_all(course_dir_name)
-    except Exception as e:
-        error(f"Chapter generation stopped: {e}")
-        sys.exit(1)
-    # Final QA
-    try:
-        cmd_qa(course_dir_name)
-    except Exception as e:
-        error(f"Final QA failed: {e}")
-        sys.exit(1)
-    # Compile
-    try:
-        cmd_compile(course_dir_name)
-    except Exception as e:
-        error(f"Compilation failed: {e}")
-        sys.exit(1)
-    print("\nAll done. Your lecture note is ready.")
-    print(f"Output: {COURSES_DIR / course_dir_name / 'output.pdf'}")
-    return course_dir_name
+    print(
+        "Generating your lecture note now — this runs straight through, start to finish.\n"
+    )
+    return run_pipeline(course_dir_name)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
