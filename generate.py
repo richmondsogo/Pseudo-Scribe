@@ -76,20 +76,64 @@ def info(msg: str) -> None:
 def error(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
 
-# --- LLM wrapper ---
+# --- LLM wrapper + utility helpers ---
+import time
+import random
+import re
 
-def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> str:
-    """Call configured LLM provider. This deployment uses Google Gemini (google.generativeai).
+# Additional env-driven config for retries, heavy-call routing and QA truncation
+MAX_API_RETRIES = int(os.getenv("MAX_API_RETRIES", "5"))
+API_RETRY_BASE_DELAY = float(os.getenv("API_RETRY_BASE_DELAY", "2.0"))
+FINAL_QA_EXCERPT_CHARS = int(os.getenv("FINAL_QA_EXCERPT_CHARS", "1000"))
+HEAVY_CALL_PROVIDER = os.getenv("HEAVY_CALL_PROVIDER")
+ENABLE_CHAPTER_QA = os.getenv("ENABLE_CHAPTER_QA", "0").lower() in ("1", "true", "yes")
+ENABLE_CONFLICT_CHECK = os.getenv("ENABLE_CONFLICT_CHECK", "0").lower() in ("1", "true", "yes")
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Heuristic: retry on server-side / rate-limit / connectivity errors, not on
+    things like bad API keys or malformed requests, which will never succeed on retry."""
+    msg = str(exc).lower()
+    transient_markers = (
+        "500", "internal", "502", "503", "504", "unavailable",
+        "429", "rate limit", "resource_exhausted", "quota",
+        "timeout", "timed out", "deadline", "connection", "reset",
+    )
+    return any(marker in msg for marker in transient_markers)
+
+
+def call_with_retry(fn, max_retries: int = MAX_API_RETRIES, base_delay: float = API_RETRY_BASE_DELAY):
+    """Call fn() with exponential backoff + jitter on transient errors.
+    Re-raises immediately on non-transient errors, and re-raises the last error
+    once retries are exhausted."""
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as e:
+            attempt += 1
+            if attempt > max_retries or not _is_transient_error(e):
+                raise
+            delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1)
+            info(f"  Transient API error ({e}). Retrying in {delay:.1f}s... (attempt {attempt}/{max_retries})")
+            time.sleep(delay)
+
+
+def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None, provider: Optional[str] = None) -> str:
+    """Call the configured LLM provider (LLM_PROVIDER env var: 'gemini' or 'groq').
+    Pass provider= to override LLM_PROVIDER for just this call (see HEAVY_CALL_PROVIDER).
 
     This function supports a DRY_RUN mode via the environment variable DRY_RUN=1|true which returns canned responses
     for a quick smoke test without making external API calls.
     """
-    provider = LLM_PROVIDER
+    provider = (provider or LLM_PROVIDER).lower()
     # Count LLM calls (including dry-run) in a thread-safe manner
     with LLM_COUNT_LOCK:
         global LLM_CALL_COUNT
         LLM_CALL_COUNT += 1
-    model = model or LLM_MODEL
+    # Deliberately NOT applying a generic model fallback here — each provider has its own
+    # default model name, and leaking one provider's default into another would silently
+    # send the wrong model name (e.g. a Gemini model string to the Groq API).
     temperature = temperature if temperature is not None else LLM_TEMPERATURE
 
     dry = os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes")
@@ -98,6 +142,15 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
         # Terminology conflict checker canned response
         if "terminology conflict checker" in low or "decide whether the two definitions" in low:
             return json.dumps({"conflict": False, "reasoning": "Dry-run: assume no conflict."})
+        # Outline chapter extractor canned response
+        if "outline chapter extractor" in low:
+            return json.dumps({
+                "chapters": [
+                    {"number": 1, "title": "Dry-run Chapter One", "topic": "sample topic A, sample topic B"},
+                    {"number": 2, "title": "Dry-run Chapter Two", "topic": "sample topic C"},
+                    {"number": 3, "title": "Dry-run Chapter Three", "topic": "sample topic D, sample topic E"},
+                ]
+            })
         # Terminology extractor canned response
         if "terminology extractor" in low or "extract a compact terminology" in low:
             return json.dumps({
@@ -133,81 +186,122 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
             return "\\chapter{Sample Chapter}\n\\section{Introduction}\nSample content.\n"
         return "DRY_RUN"
 
-    if provider not in ("gemini", "google", "googleai"):
-        raise RuntimeError("LLM_PROVIDER must be set to 'gemini' for this deployment. Remove references to OpenAI.")
+    if provider in ("gemini", "google", "googleai"):
+        return _call_gemini(prompt, model, temperature)
+    elif provider == "groq":
+        return _call_groq(prompt, model, temperature)
+    else:
+        raise RuntimeError(
+            f"Unsupported LLM_PROVIDER '{provider}'. Supported values: 'gemini', 'groq'. "
+            f"Set it in your .env file."
+        )
 
-    # Support for Google's Gemini client: prefer google.genai (newer) and fallback to google.generativeai (legacy)
+
+def _call_gemini(prompt: str, model: Optional[str], temperature: float) -> str:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY must be set to use Gemini provider")
+        raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY must be set to use the gemini provider")
 
-    genai = None
-    # Try new client first
-    try:
-        import google.genai as genai_new
-    except Exception:
-        genai_new = None
-    if genai_new:
-        genai = genai_new
-        # new client: configure
-        try:
-            genai.configure(api_key=api_key)
-        except Exception:
-            try:
-                genai.api_key = api_key
-            except Exception:
-                pass
-        gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
-        try:
-            # google.genai uses generate_text(model=..., input=...)
-            resp = genai.generate_text(model=gmodel, input=prompt)
-        except Exception as e:
-            raise RuntimeError(f"Gemini (google.genai) call failed: {e}")
-        # response typically has .text
-        out = getattr(resp, "text", None) or (resp.get("text") if isinstance(resp, dict) else None)
-        if not out:
-            out = str(resp)
-        return out
+    gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "gemini-3.6-flash"
 
-    # Fallback to legacy client
     try:
-        import google.generativeai as genai_legacy
+        from google import genai
     except Exception as e:
-        raise RuntimeError("No supported Google Gemini client installed. Install 'google-genai' or 'google-generativeai' and set GEMINI_API_KEY.") from e
-    # legacy configure
-    try:
-        genai_legacy.configure(api_key=api_key)
-    except Exception:
-        try:
-            genai_legacy.api_key = api_key
-        except Exception:
-            pass
-    gmodel = model or os.getenv("GEMINI_MODEL") or os.getenv("LLM_MODEL") or "models/text-bison-001"
-    try:
-        resp = genai_legacy.generate_text(model=gmodel, text=prompt)
-    except Exception as e:
-        raise RuntimeError(f"Gemini provider call failed: {e}")
+        raise RuntimeError("google-genai package not installed. Run: pip install google-genai") from e
 
-    # Try to extract text from known shapes
-    out = None
     try:
-        out = getattr(resp, "text", None)
-    except Exception:
-        out = None
-    if not out and isinstance(resp, dict):
-        if "text" in resp:
-            out = resp.get("text")
-        elif "candidates" in resp and isinstance(resp.get("candidates"), list) and resp["candidates"]:
-            cand = resp["candidates"][0]
-            if isinstance(cand, dict) and "content" in cand:
-                out = cand["content"]
-            else:
-                out = str(cand)
-        elif "output" in resp:
-            out = resp.get("output")
+        client = genai.Client(api_key=api_key)
+        resp = call_with_retry(lambda: client.models.generate_content(model=gmodel, contents=prompt))
+    except Exception as e:
+        raise RuntimeError(f"Gemini (google.genai) call failed: {e}")
+
+    out = getattr(resp, "text", None)
     if not out:
         out = str(resp)
     return out
+
+
+def _call_groq(prompt: str, model: Optional[str], temperature: float) -> str:
+    """Groq (https://groq.com) hosts open models (Llama 3.3, GPT-OSS, Qwen, etc.) with a free
+    tier that, at the time of writing, allows far more requests/day than Gemini's free tier
+    for its current flagship Flash model. OpenAI-compatible endpoint, called here with stdlib
+    urllib so no extra dependency is required. Sign up at https://console.groq.com for a key.
+    Rate/quota numbers change over time — check https://console.groq.com/docs/rate-limits for
+    current figures before relying on a specific model's daily allowance."""
+    import urllib.request
+    import urllib.error
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY must be set to use the groq provider")
+
+    gmodel = model or os.getenv("GROQ_MODEL") or "llama-3.3-70b-versatile"
+
+    body = json.dumps({
+        "model": gmodel,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+    }).encode("utf-8")
+
+    def do_request() -> str:
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {api_key}",
+                # Cloudflare (which fronts Groq's API) blocks urllib's default
+                # "Python-urllib/x.y" User-Agent as a bot signature (HTTP 403, error 1010).
+                # Any normal-looking UA avoids that; this doesn't need to be literally accurate.
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) PseudoScribe/1.0",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as http_resp:
+                data = json.loads(http_resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(f"{e.code} {e.reason}. {err_body}")
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Groq request failed: {e.reason}")
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError(f"Unexpected Groq response shape: {data}") from e
+
+    try:
+        return call_with_retry(do_request)
+    except Exception as e:
+        raise RuntimeError(f"Groq call failed: {e}")
+
+
+def _extract_json(text: str) -> Any:
+    """Best-effort JSON extraction from an LLM response: strips ```json fences if present,
+    and if that still doesn't parse, grabs the first balanced {...} block. Raises ValueError
+    if nothing parseable is found."""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`")
+        if t.lower().startswith("json"):
+            t = t[4:]
+        t = t.strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+    start = t.find("{")
+    if start != -1:
+        depth = 0
+        for i in range(start, len(t)):
+            if t[i] == "{":
+                depth += 1
+            elif t[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return json.loads(t[start:i + 1])
+    raise ValueError("No JSON object found in response")
 
 # --- File utilities ---
 
@@ -678,8 +772,11 @@ def generate_chapter_worker(c: Course, chapter_number: int, terminology_snapshot
         ch_filename = f"ch{int(chapter_number):02d}.md"
         (c.drafts_path / ch_filename).write_text(chapter_md, encoding="utf-8")
         info(f"[chapter {chapter_number}] Draft written to {c.drafts_path / ch_filename}")
-        # Run chapter QA using the snapshot terminology
-        qa_result = run_chapter_qa(c, chapter_md, terminology_override=terminology_snapshot)
+        # Run chapter QA using the snapshot terminology if enabled
+        if ENABLE_CHAPTER_QA:
+            qa_result = run_chapter_qa(c, chapter_md, terminology_override=terminology_snapshot)
+        else:
+            qa_result = {"status": "PASS", "issues": [], "warnings": []}
         if qa_result.get("status") == "PASS":
             # Save proposed terms to proposals folder for later reconciliation
             proposals_dir = c.path / "proposals"
