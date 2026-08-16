@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # Load .env if present so environment variables in .env are available at runtime
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     # If python-dotenv is not installed, continue — environment may be set externally
@@ -69,9 +70,11 @@ REPO_ROOT = Path(__file__).resolve().parent
 COURSES_DIR = REPO_ROOT / "courses"
 PROMPTS_DIR = REPO_ROOT / "prompts"
 
+
 # Simple logging
 def info(msg: str) -> None:
     print(msg)
+
 
 def error(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -153,37 +156,64 @@ def call_llm(prompt: str, model: Optional[str] = None, temperature: Optional[flo
             })
         # Terminology extractor canned response
         if "terminology extractor" in low or "extract a compact terminology" in low:
-            return json.dumps({
-                "terms": {
-                    "example_term": {
-                        "preferred_term": "example_term",
-                        "definition": "An example term used in dry run.",
-                        "definition_status": "defined",
-                        "introduced_in": 1
+            return json.dumps(
+                {
+                    "terms": {
+                        "example_term": {
+                            "preferred_term": "example_term",
+                            "definition": "An example term used in dry run.",
+                            "definition_status": "defined",
+                            "introduced_in": 1,
+                        }
                     }
                 }
-            })
+            )
         # Chapter writer canned response (terminology + chapter)
-        if "you are writing one chapter" in low or "[terminology]" in prompt or "[chapter]" in prompt:
-            term_json = {"new_term": {"preferred_term": "new_term", "definition": "A dry-run example term.", "definition_status": "defined", "introduced_in": None}}
+        if (
+            "you are writing one chapter" in low
+            or "[terminology]" in prompt
+            or "[chapter]" in prompt
+        ):
+            term_json = {
+                "new_term": {
+                    "preferred_term": "new_term",
+                    "definition": "A dry-run example term.",
+                    "definition_status": "defined",
+                    "introduced_in": None,
+                }
+            }
             chapter_md = "# Sample Chapter\n\nThis is a short sample chapter generated in dry-run mode.\n\n## Section 1\nSample content.\n\n## Conclusion\nShort conclusion.\n\n### Tutorial Questions\n1. Sample recall question\n2. Sample conceptual question\n3. Sample application question\n4. Sample comparison question\n5. Sample problem-solving question\n6. Sample extension question\n"
-            return "[TERMINOLOGY]\n" + json.dumps(term_json) + "\n[/TERMINOLOGY]\n\n[CHAPTER]\n" + chapter_md + "\n[/CHAPTER]"
+            return (
+                "[TERMINOLOGY]\n"
+                + json.dumps(term_json)
+                + "\n[/TERMINOLOGY]\n\n[CHAPTER]\n"
+                + chapter_md
+                + "\n[/CHAPTER]"
+            )
         # Chapter QA canned pass
         if "chapter qa assistant" in low or "chapter_markdown" in low:
             return json.dumps({"status": "PASS", "issues": [], "warnings": []})
         # Final QA canned pass
-        if "final-course qa" in low or "final course markdown" in low or "final_course_markdown" in low:
-            return json.dumps({
-                "status": "PASS",
-                "critical_issues": [],
-                "warnings": [],
-                "coverage": {"complete": True, "missing": []},
-                "terminology_consistent": True,
-                "cross_chapter_consistent": True
-            })
+        if (
+            "final-course qa" in low
+            or "final course markdown" in low
+            or "final_course_markdown" in low
+        ):
+            return json.dumps(
+                {
+                    "status": "PASS",
+                    "critical_issues": [],
+                    "warnings": [],
+                    "coverage": {"complete": True, "missing": []},
+                    "terminology_consistent": True,
+                    "cross_chapter_consistent": True,
+                }
+            )
         # Typesetter canned LaTeX fragment
         if "typeset" in low or "latex" in low or "chapter_markdown" in low:
-            return "\\chapter{Sample Chapter}\n\\section{Introduction}\nSample content.\n"
+            return (
+                "\\chapter{Sample Chapter}\n\\section{Introduction}\nSample content.\n"
+            )
         return "DRY_RUN"
 
     if provider in ("gemini", "google", "googleai"):
@@ -305,20 +335,25 @@ def _extract_json(text: str) -> Any:
 
 # --- File utilities ---
 
+
 def load_json(path: Path) -> Any:
     # Use utf-8-sig to tolerate files with BOM (e.g., written from Windows editors)
     with path.open("r", encoding="utf-8-sig") as f:
         return json.load(f)
+
 
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
+
 # --- Course layout helpers ---
+
 
 def course_path(course_id: str) -> Path:
     return COURSES_DIR / course_id
+
 
 @dataclass
 class Course:
@@ -351,7 +386,9 @@ class Course:
             output_pdf=p / "output.pdf",
         )
 
+
 # --- Template rendering ---
+
 
 def render_prompt(template: str, context: Dict[str, Any]) -> str:
     # Very small placeholder replacement
@@ -365,7 +402,9 @@ def render_prompt(template: str, context: Dict[str, Any]) -> str:
         result = result.replace(placeholder, repl)
     return result
 
+
 # --- Prompt loading ---
+
 
 def load_prompt(name: str) -> str:
     path = PROMPTS_DIR / name
@@ -373,12 +412,15 @@ def load_prompt(name: str) -> str:
         raise FileNotFoundError(f"Prompt template not found: {path}")
     return path.read_text(encoding="utf-8")
 
+
 # --- Terminology utilities ---
+
 
 def load_terminology(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {"terms": {}}
     return load_json(path)
+
 
 def save_terminology(path: Path, data: Dict[str, Any]) -> None:
     # Do not overwrite lightly; write atomically
@@ -386,8 +428,11 @@ def save_terminology(path: Path, data: Dict[str, Any]) -> None:
     save_json(tmp, data)
     tmp.replace(path)
 
+
 # Compare definitions using LLM: returns True if conflict
-def definitions_conflict(existing_def: Optional[str], new_def: Optional[str]) -> Tuple[bool, str]:
+def definitions_conflict(
+    existing_def: Optional[str], new_def: Optional[str]
+) -> Tuple[bool, str]:
     # If either is None or empty, consider non-conflict unless both are present and clearly contradictory
     if not existing_def or not new_def:
         return False, "one or both definitions empty -> no conflict"
@@ -423,9 +468,14 @@ Be conservative: if uncertain, set conflict=true.
         # otherwise be conservative
         return True, "Unclear from checker response; conservatively flagging conflict"
     except Exception:
-        return True, "Failed to parse checker response; conservatively flagging conflict"
+        return (
+            True,
+            "Failed to parse checker response; conservatively flagging conflict",
+        )
+
 
 # --- Core operations ---
+
 
 def cmd_init(course_id: str) -> None:
     p = course_path(course_id)
@@ -439,16 +489,17 @@ def cmd_init(course_id: str) -> None:
     (p / "final").mkdir()
     info(f"Created course skeleton at {p}")
     # write minimal outline.json template
-    outline = {
-        "course_code": course_id,
-        "course_title": "",
-        "chapters": []
-    }
+    outline = {"course_code": course_id, "course_title": "", "chapters": []}
     save_json(p / "outline.json", outline)
     # empty terminology
     save_json(p / "terminology.json", {"terms": {}})
     # generation_state
-    state = {"status": "not_started", "chapters": {}, "final_qa": False, "compiled": False}
+    state = {
+        "status": "not_started",
+        "chapters": {},
+        "final_qa": False,
+        "compiled": False,
+    }
     save_json(p / "generation_state.json", state)
     # copy prompt templates from repo prompts if present
     repo_prompts = PROMPTS_DIR
@@ -456,7 +507,10 @@ def cmd_init(course_id: str) -> None:
         for file in repo_prompts.iterdir():
             if file.is_file():
                 shutil.copy(file, p / "prompts" / file.name)
-    info("Initialization complete. Edit course_profile.md and outline.json then run terminology extraction.")
+    info(
+        "Initialization complete. Edit course_profile.md and outline.json then run terminology extraction."
+    )
+
 
 def cmd_profile(course_id: str) -> None:
     c = Course.load(course_id)
@@ -482,12 +536,12 @@ def cmd_profile(course_id: str) -> None:
         * Avoid filler.
         * Use consistent terminology.
         * Do not use conversational language.
-        """
-        )
+        """)
         c.profile_path.write_text(template, encoding="utf-8")
         info(f"Wrote template profile to {c.profile_path}")
     else:
         info(f"Profile exists at {c.profile_path}. Open and edit as required.")
+
 
 def require_course_files(c: Course) -> None:
     if not c.path.exists():
@@ -500,7 +554,16 @@ def require_course_files(c: Course) -> None:
         # create empty
         save_json(c.terminology_path, {"terms": {}})
     if not c.generation_state_path.exists():
-        save_json(c.generation_state_path, {"status": "in_progress", "chapters": {}, "final_qa": False, "compiled": False})
+        save_json(
+            c.generation_state_path,
+            {
+                "status": "in_progress",
+                "chapters": {},
+                "final_qa": False,
+                "compiled": False,
+            },
+        )
+
 
 def cmd_terminology(course_id: str) -> None:
     c = Course.load(course_id)
@@ -511,7 +574,7 @@ def cmd_terminology(course_id: str) -> None:
     context = {
         "course_profile": profile,
         "outline_json": outline,
-        "source_materials": ""
+        "source_materials": "",
     }
     prompt = render_prompt(terminology_template, context)
     info("Calling LLM for initial terminology extraction (cost-conscious prompt)...")
@@ -533,7 +596,9 @@ def cmd_terminology(course_id: str) -> None:
     except Exception:
         # fallback: save raw response into terminology_raw.json for inspection and fail conservatively
         (c.path / "terminology_raw.txt").write_text(resp, encoding="utf-8")
-        error("Failed to parse terminology extractor output as JSON. Saved raw response to terminology_raw.txt")
+        error(
+            "Failed to parse terminology extractor output as JSON. Saved raw response to terminology_raw.txt"
+        )
         sys.exit(1)
     # Merge with existing but do not overwrite
     existing = load_terminology(c.terminology_path)
@@ -546,7 +611,9 @@ def cmd_terminology(course_id: str) -> None:
         entry = {
             "preferred_term": v.get("preferred_term") if isinstance(v, dict) else k,
             "definition": v.get("definition") if isinstance(v, dict) else None,
-            "definition_status": v.get("definition_status") if isinstance(v, dict) else "undefined",
+            "definition_status": (
+                v.get("definition_status") if isinstance(v, dict) else "undefined"
+            ),
             "introduced_in": v.get("introduced_in") if isinstance(v, dict) else None,
         }
         existing_terms[k] = entry
@@ -554,6 +621,7 @@ def cmd_terminology(course_id: str) -> None:
     existing["terms"] = existing_terms
     save_terminology(c.terminology_path, existing)
     info(f"Terminology extraction complete. {added} new terms added.")
+
 
 # Parse LLM chapter generation output into terminology and chapter
 def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
@@ -565,7 +633,7 @@ def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
     terms = {}
     chapter = ""
     if term_start != -1 and term_end != -1:
-        raw = text[term_start + len("[TERMINOLOGY]"):term_end].strip()
+        raw = text[term_start + len("[TERMINOLOGY]") : term_end].strip()
         # try JSON
         try:
             parsed = json.loads(raw)
@@ -580,22 +648,30 @@ def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
             # Write a fallback file
             terms = {}
     if chap_start != -1 and chap_end != -1:
-        chapter = text[chap_start + len("[CHAPTER]"):chap_end].strip()
+        chapter = text[chap_start + len("[CHAPTER]") : chap_end].strip()
     else:
         # If markers not present, assume whole response is chapter
         chapter = text.strip()
     return terms, chapter
 
-def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = MAX_CHAPTER_RETRIES) -> None:
+
+def generate_chapter_content(
+    c: Course, chapter_number: int, max_retries: int = MAX_CHAPTER_RETRIES
+) -> None:
     require_course_files(c)
     outline = load_json(c.outline_path)
     chapters = outline.get("chapters", [])
-    chap = next((ch for ch in chapters if int(ch.get("number")) == int(chapter_number)), None)
+    chap = next(
+        (ch for ch in chapters if int(ch.get("number")) == int(chapter_number)), None
+    )
     if not chap:
         raise ValueError(f"Chapter {chapter_number} not found in outline")
     state = load_json(c.generation_state_path)
     chapter_state = state.get("chapters", {})
-    if str(chapter_number) in chapter_state and chapter_state[str(chapter_number)] == "complete":
+    if (
+        str(chapter_number) in chapter_state
+        and chapter_state[str(chapter_number)] == "complete"
+    ):
         info(f"Chapter {chapter_number} already complete. Skipping.")
         return
     profile = c.profile_path.read_text(encoding="utf-8")
@@ -607,7 +683,9 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
     last_error = None
     while attempts < max_retries:
         attempts += 1
-        info(f"[Attempt {attempts}/{max_retries}] Generating chapter {chapter_number} ...")
+        info(
+            f"[Attempt {attempts}/{max_retries}] Generating chapter {chapter_number} ..."
+        )
         context = {
             "course_profile": profile,
             "outline_json": outline,
@@ -615,7 +693,7 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
             "chapter_number": chapter_number,
             "chapter_title": chap.get("title"),
             "chapter_topic": chap.get("topic"),
-            "source_materials": ""
+            "source_materials": "",
         }
         prompt = render_prompt(chapter_writer_template, context)
         resp = call_llm(prompt)
@@ -635,7 +713,9 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
             elif isinstance(term_val, dict):
                 pref = term_val.get("preferred_term") or term_key
                 ddef = term_val.get("definition")
-                status = term_val.get("definition_status") or ("defined" if ddef else "undefined")
+                status = term_val.get("definition_status") or (
+                    "defined" if ddef else "undefined"
+                )
             else:
                 continue
             if pref in loaded_terms:
@@ -652,7 +732,7 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
                     "preferred_term": pref,
                     "definition": ddef,
                     "definition_status": status,
-                    "introduced_in": int(chapter_number)
+                    "introduced_in": int(chapter_number),
                 }
         if conflict_found:
             last_error = "; ".join(conflict_messages)
@@ -660,7 +740,9 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
             # Stop generation and surface error to user
             state["chapters"][str(chapter_number)] = "failed"
             save_json(c.generation_state_path, state)
-            raise RuntimeError(f"Terminology conflict during generation of chapter {chapter_number}: {last_error}")
+            raise RuntimeError(
+                f"Terminology conflict during generation of chapter {chapter_number}: {last_error}"
+            )
         # Save updated terminology (merge)
         terminology_json["terms"] = loaded_terms
         save_terminology(c.terminology_path, terminology_json)
@@ -675,7 +757,9 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
         total_chapters = len(chapters)
         title = chap.get("title") or f"Chapter {chapter_number}"
         if qa_result.get("status") == "PASS":
-            info(f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA passed")
+            info(
+                f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA passed"
+            )
             state["chapters"][str(chapter_number)] = "complete"
             save_json(c.generation_state_path, state)
             return
@@ -683,7 +767,9 @@ def generate_chapter_content(c: Course, chapter_number: int, max_retries: int = 
             issues = qa_result.get("issues", [])
             warnings = qa_result.get("warnings", [])
             brief_issues = issues if issues else warnings
-            info(f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA failed: {brief_issues}")
+            info(
+                f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA failed: {brief_issues}"
+            )
             error(f"Chapter QA failed: {issues}")
             last_error = str(issues)
             # Leave draft intact, mark failed and retry if possible
@@ -702,7 +788,7 @@ def run_chapter_qa(c: Course, chapter_markdown: str, terminology_override: Optio
         "course_profile": profile,
         "outline_json": outline,
         "terminology_json": terminology,
-        "chapter_markdown": chapter_markdown
+        "chapter_markdown": chapter_markdown,
     }
     prompt = render_prompt(template, context)
     resp = call_llm(prompt, temperature=0.0)
@@ -713,7 +799,9 @@ def run_chapter_qa(c: Course, chapter_markdown: str, terminology_override: Optio
     except Exception:
         # Save raw
         (c.path / "chapter_qa_raw.txt").write_text(resp, encoding="utf-8")
-        error("Failed to parse chapter QA response as JSON. Saved raw output to chapter_qa_raw.txt")
+        error(
+            "Failed to parse chapter QA response as JSON. Saved raw output to chapter_qa_raw.txt"
+        )
         return {"status": "FAIL", "issues": ["Invalid QA response format"]}
 
 
@@ -934,7 +1022,9 @@ def cmd_all(course_id: str) -> None:
         sys.exit(1)
     info("All chapters generation finished (or were already complete).")
 
+
 # Final QA
+
 
 def cmd_qa(course_id: str) -> None:
     c = Course.load(course_id)
@@ -962,14 +1052,16 @@ def cmd_qa(course_id: str) -> None:
         "course_profile": profile,
         "outline_json": outline,
         "terminology_json": terminology,
-        "final_course_markdown": final_content
+        "final_course_markdown": final_content,
     }
     prompt = render_prompt(template, context)
     info("Running final course QA. This may be a longer call.")
     resp = call_llm(prompt, temperature=0.0)
     try:
         report = json.loads(resp)
-        (c.final_path / "final_qa.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+        (c.final_path / "final_qa.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
         status = report.get("status", "FAIL")
         if status != "PASS":
             error(f"Final QA failed: {report.get('critical_issues', [])}")
@@ -981,10 +1073,14 @@ def cmd_qa(course_id: str) -> None:
             save_json(c.generation_state_path, state)
     except Exception:
         (c.final_path / "final_qa_raw.txt").write_text(resp, encoding="utf-8")
-        error("Failed to parse final QA response as JSON. Saved raw output to final_qa_raw.txt")
+        error(
+            "Failed to parse final QA response as JSON. Saved raw output to final_qa_raw.txt"
+        )
         sys.exit(1)
 
+
 # Typesetting: ask LLM to convert markdown chapter into LaTeX chapter file according to rules.
+
 
 def typeset_chapter(c: Course, chapter_number: int) -> None:
     fname = c.drafts_path / f"ch{int(chapter_number):02d}.md"
@@ -1004,18 +1100,26 @@ def typeset_chapter(c: Course, chapter_number: int) -> None:
     # Otherwise run typesetter LLM
     template = load_prompt("typesetter.txt")
     outline = load_json(c.outline_path)
-    chap = next((ch for ch in outline.get("chapters", []) if int(ch.get("number")) == int(chapter_number)), None)
+    chap = next(
+        (
+            ch
+            for ch in outline.get("chapters", [])
+            if int(ch.get("number")) == int(chapter_number)
+        ),
+        None,
+    )
     context = {
         "chapter_number": chapter_number,
         "chapter_title": chap.get("title") if chap else f"Chapter {chapter_number}",
         "chapter_markdown": md,
-        "terminology_json": load_terminology(c.terminology_path)
+        "terminology_json": load_terminology(c.terminology_path),
     }
     prompt = render_prompt(template, context)
     resp = call_llm(prompt, temperature=0.0)
     # Expect LaTeX content (no documentclass or begin/end document)
     texfile.write_text(resp, encoding="utf-8")
     info(f"Wrote LaTeX chapter {texfile}")
+
 
 def cmd_compile(course_id: str) -> None:
     c = Course.load(course_id)
@@ -1033,13 +1137,15 @@ def cmd_compile(course_id: str) -> None:
     main = []
     main.append("\\documentclass[12pt]{report}\n")
     main.append("\\usepackage[a4paper,margin=1in]{geometry}\n")
-    main.append("\\usepackage{lmodern}\n\\usepackage{microtype}\n\\usepackage{graphicx}\n\\usepackage{booktabs}\n\\usepackage{tabularx}\n\\usepackage{longtable}\n\\usepackage{array}\n\\usepackage{float}\n\\usepackage{enumitem}\n\\usepackage{amsmath}\n\\usepackage{amssymb}\n\\usepackage{parskip}\n\\usepackage{hyperref}\n\n")
+    main.append(
+        "\\usepackage{lmodern}\n\\usepackage{microtype}\n\\usepackage{graphicx}\n\\usepackage{booktabs}\n\\usepackage{tabularx}\n\\usepackage{longtable}\n\\usepackage{array}\n\\usepackage{float}\n\\usepackage{enumitem}\n\\usepackage{amsmath}\n\\usepackage{amssymb}\n\\usepackage{parskip}\n\\usepackage{hyperref}\n\n"
+    )
     # Title page data from profile
     profile_text = c.profile_path.read_text(encoding="utf-8")
     title = "Lecture Notes"
     for line in profile_text.splitlines():
         if line.lower().startswith("course title:"):
-            title = line.split(":",1)[1].strip() or title
+            title = line.split(":", 1)[1].strip() or title
     main.append("\\begin{document}\n")
     main.append("\\begin{titlepage}\n\\centering\n")
     main.append(f"\\Huge\\textbf{{{title}}}\\\\\n")
@@ -1070,7 +1176,9 @@ def cmd_compile(course_id: str) -> None:
             info(f"Running LaTeX pass {i+1}...")
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if res.returncode != 0:
-                (c.path / "latex_error.log").write_bytes(res.stdout + b"\n\n" + res.stderr)
+                (c.path / "latex_error.log").write_bytes(
+                    res.stdout + b"\n\n" + res.stderr
+                )
                 error("LaTeX compilation failed. See latex_error.log in course folder.")
                 sys.exit(1)
         # Move output to output.pdf
@@ -1085,6 +1193,7 @@ def cmd_compile(course_id: str) -> None:
             sys.exit(1)
     finally:
         os.chdir(old_cwd)
+
 
 def cmd_build(course_id: str) -> None:
     c = Course.load(course_id)
@@ -1101,6 +1210,7 @@ def cmd_build(course_id: str) -> None:
     # Compile
     cmd_compile(course_id)
 
+
 # --- Interactive mode and CLI ---
 import re
 from typing import Iterable
@@ -1108,7 +1218,9 @@ from typing import Iterable
 
 def format_course_dir_name(course_code: str, course_title: str) -> str:
     safe_code = "".join(ch for ch in course_code if ch.isalnum())
-    safe_title = "".join(ch if (ch.isalnum() or ch.isspace()) else "" for ch in course_title)
+    safe_title = "".join(
+        ch if (ch.isalnum() or ch.isspace()) else "" for ch in course_title
+    )
     title_slug = "_".join(safe_title.strip().split())
     name = f"{safe_code}_{title_slug}" if title_slug else safe_code
     return name
@@ -1118,9 +1230,9 @@ def parse_outline_text_to_chapters(text: str) -> List[Dict[str, Any]]:
     # Heuristic parsing: look for lines starting with 'Chapter' or numeric headings or markdown headings
     chapters: List[Dict[str, Any]] = []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    chapter_re = re.compile(r'^(?:Chapter\s+)?(\d{1,3})[:\.)\s-]*(.*)$', re.IGNORECASE)
-    md_heading_re = re.compile(r'^#{1,3}\s+(.*)$')
-    numbered_re = re.compile(r'^(\d{1,3})[\.:]\s+(.*)$')
+    chapter_re = re.compile(r"^(?:Chapter\s+)?(\d{1,3})[:\.)\s-]*(.*)$", re.IGNORECASE)
+    md_heading_re = re.compile(r"^#{1,3}\s+(.*)$")
+    numbered_re = re.compile(r"^(\d{1,3})[\.:]\s+(.*)$")
     # First pass: collect candidate headings
     for ln in lines:
         m = chapter_re.match(ln)
@@ -1133,14 +1245,16 @@ def parse_outline_text_to_chapters(text: str) -> List[Dict[str, Any]]:
         if m:
             title = m.group(1).strip()
             # try to see if title begins with a number
-            m2 = re.match(r'^(\d{1,3})[\s\-:\.)]+(.*)$', title)
+            m2 = re.match(r"^(\d{1,3})[\s\-:\.)]+(.*)$", title)
             if m2:
                 num = int(m2.group(1))
                 t = m2.group(2).strip() or f"Chapter {num}"
                 chapters.append({"number": num, "title": t, "topic": ""})
             else:
                 # treat as a heading; if no explicit number assign next
-                chapters.append({"number": len(chapters) + 1, "title": title, "topic": ""})
+                chapters.append(
+                    {"number": len(chapters) + 1, "title": title, "topic": ""}
+                )
             continue
         m = numbered_re.match(ln)
         if m:
@@ -1180,14 +1294,18 @@ def parse_outline_file(path: Path) -> Dict[str, Any]:
         try:
             import docx
         except Exception:
-            raise RuntimeError("python-docx is required to parse .docx outlines. Install via requirements.txt")
+            raise RuntimeError(
+                "python-docx is required to parse .docx outlines. Install via requirements.txt"
+            )
         doc = docx.Document(str(path))
         text = "\n".join(p.text for p in doc.paragraphs)
     elif ext == ".pdf":
         try:
             from PyPDF2 import PdfReader
         except Exception:
-            raise RuntimeError("PyPDF2 is required to parse .pdf outlines. Install via requirements.txt")
+            raise RuntimeError(
+                "PyPDF2 is required to parse .pdf outlines. Install via requirements.txt"
+            )
         reader = PdfReader(str(path))
         pages = []
         for p in reader.pages:
@@ -1254,7 +1372,9 @@ def interactive_setup() -> str:
                 try:
                     st = load_json(state_file)
                     chapters = st.get("chapters", {})
-                    total_complete = sum(1 for v in chapters.values() if v == "complete")
+                    total_complete = sum(
+                        1 for v in chapters.values() if v == "complete"
+                    )
                     if chapters and total_complete < max(1, len(chapters)):
                         incomplete.append((p.name, total_complete, len(chapters)))
                 except Exception:
@@ -1283,9 +1403,17 @@ def interactive_setup() -> str:
     outline_path = None
     outline_text: Optional[str] = None
     outline_name = ""
-    paste_choice = input("Paste the outline into the terminal instead of providing a file? [y/N]: ").strip().lower()
+    paste_choice = (
+        input(
+            "Paste the outline into the terminal instead of providing a file? [y/N]: "
+        )
+        .strip()
+        .lower()
+    )
     if paste_choice in ("y", "yes"):
-        print("Paste your outline below. End with a single line containing only END (or Ctrl+D/Ctrl+Z):")
+        print(
+            "Paste your outline below. End with a single line containing only END (or Ctrl+D/Ctrl+Z):"
+        )
         lines: List[str] = []
         try:
             while True:
@@ -1313,11 +1441,17 @@ def interactive_setup() -> str:
                 break
             print(f"File not found: {p}. Please try again.")
     # Source materials (optional)
-    print("\nSource materials are optional. The generator works from the course outline and learning outcomes alone.")
-    print("If you have slides or readings you want the generator to use, provide a path. Otherwise press Enter to skip.")
+    print(
+        "\nSource materials are optional. The generator works from the course outline and learning outcomes alone."
+    )
+    print(
+        "If you have slides or readings you want the generator to use, provide a path. Otherwise press Enter to skip."
+    )
     source_materials = None
     while True:
-        s = input("Path to file or directory with source materials (leave blank to skip): ").strip()
+        s = input(
+            "Path to file or directory with source materials (leave blank to skip): "
+        ).strip()
         if not s:
             # user chose to skip
             break
@@ -1337,9 +1471,9 @@ def interactive_setup() -> str:
     print(f"Session:    {academic_session}")
     # Outline may have been pasted (outline_path is None). Use outline_name if available.
     outline_display = None
-    if 'outline_path' in locals() and outline_path:
+    if "outline_path" in locals() and outline_path:
         outline_display = outline_path.name
-    elif 'outline_name' in locals() and outline_name:
+    elif "outline_name" in locals() and outline_name:
         outline_display = outline_name
     else:
         outline_display = "none provided"
@@ -1353,7 +1487,9 @@ def interactive_setup() -> str:
     course_dir_name = format_course_dir_name(course_code, course_title)
     course_dir = COURSES_DIR / course_dir_name
     if course_dir.exists():
-        print(f"Course directory {course_dir} already exists. Resuming or using existing data.")
+        print(
+            f"Course directory {course_dir} already exists. Resuming or using existing data."
+        )
     else:
         cmd_init(course_dir_name)
     # Parse outline and write outline.json
@@ -1368,7 +1504,7 @@ def interactive_setup() -> str:
             "university": "",
             "academic_session": "",
             "level": "",
-            "chapters": parse_outline_text_to_chapters(outline_text or "")
+            "chapters": parse_outline_text_to_chapters(outline_text or ""),
         }
     # populate metadata
     parsed_outline["course_code"] = course_code
@@ -1379,15 +1515,22 @@ def interactive_setup() -> str:
     parsed_outline["level"] = level
     parsed_outline["prepared_by"] = prepared_by
     # Save outline.json
-    (course_dir / "outline.json").write_text(json.dumps(parsed_outline, indent=2, ensure_ascii=False), encoding="utf-8")
+    (course_dir / "outline.json").write_text(
+        json.dumps(parsed_outline, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     # If outline was pasted, save the original text for provenance
     if not outline_path and outline_text:
-        (course_dir / (outline_name or "pasted_outline.md")).write_text(outline_text, encoding="utf-8")
+        (course_dir / (outline_name or "pasted_outline.md")).write_text(
+            outline_text, encoding="utf-8"
+        )
     # Save profile
     write_course_profile_from_metadata(course_dir / "course_profile.md", parsed_outline)
     # Ensure terminology and generation_state exist
     save_json(course_dir / "terminology.json", {"terms": {}})
-    save_json(course_dir / "generation_state.json", {"status": "in_progress", "chapters": {}, "final_qa": False, "compiled": False})
+    save_json(
+        course_dir / "generation_state.json",
+        {"status": "in_progress", "chapters": {}, "final_qa": False, "compiled": False},
+    )
     # Copy prompts
     repo_prompts = PROMPTS_DIR
     if repo_prompts.exists():
@@ -1489,6 +1632,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     else:
         error(f"Unknown command: {args.cmd}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
