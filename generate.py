@@ -74,11 +74,18 @@ FINAL_QA_EXCERPT_CHARS = int(os.getenv("FINAL_QA_EXCERPT_CHARS", "1000"))
 HEAVY_CALL_PROVIDER = os.getenv("HEAVY_CALL_PROVIDER")
 # Both default OFF to minimize LLM calls per chapter. Chapters are now written directly as
 # LaTeX (see prompts/chapter_writer.txt), which already removes the separate typesetting call;
-# these two remove the per-chapter QA call and the LLM-based conflict-check call. Conflicts are
-# still detected and logged when this is off — they're just resolved by always keeping the
-# first definition, without spending a call asking the model whether it's a "real" conflict.
-# Turn either back on if you have quota to spare and want the extra scrutiny.
-ENABLE_CHAPTER_QA = os.getenv("ENABLE_CHAPTER_QA", "0").lower() in ("1", "true", "yes")
+# ENABLE_CHAPTER_ENHANCE and ENABLE_CONFLICT_CHECK remove two more optional LLM calls per
+# chapter. Conflicts are still detected and logged when checking is off — they're just resolved
+# by always keeping the first definition, without spending a call asking the model whether it's
+# a "real" conflict. Turn either back on if you have quota to spare.
+# ENABLE_CHAPTER_ENHANCE runs a second pass per chapter (prompts/chapter_enhancer.txt) that
+# actively improves the draft and adds diagrams where they'd help, rather than just validating
+# it — genuinely improves output quality, at the cost of one extra call per chapter. Off by
+# default for the same reason: it doubles the chapter-generation call count. ENABLE_CHAPTER_QA
+# is accepted as an alias so an existing .env with the old name still works.
+ENABLE_CHAPTER_ENHANCE = (
+    os.getenv("ENABLE_CHAPTER_ENHANCE", os.getenv("ENABLE_CHAPTER_QA", "0")).lower() in ("1", "true", "yes")
+)
 ENABLE_CONFLICT_CHECK = os.getenv("ENABLE_CONFLICT_CHECK", "0").lower() in ("1", "true", "yes")
 # Chapters can generate concurrently via a thread pool. Defaults to 1 (sequential) deliberately:
 # concurrency doesn't reduce the *total* number of API calls a course needs (that's what actually
@@ -296,15 +303,15 @@ def _call_gemini(prompt: str, model: Optional[str], temperature: float) -> str:
 def _call_openai_compatible(provider_label: str, url: str, api_key: str, model: str,
                              prompt: str, temperature: float, extra_headers: Optional[Dict[str, str]] = None) -> str:
     """Shared implementation for any OpenAI-compatible chat-completions endpoint (Groq,
-    OpenRouter, and similar). Uses stdlib urllib so no extra dependency is required."""
-    import urllib.request
-    import urllib.error
-
-    body = json.dumps({
+    OpenRouter, and similar). Prefers the 'requests' library when available — it handles
+    connection resets and flaky networks (a common source of WinError 10054 on Windows) far
+    more gracefully than raw urllib — and falls back to stdlib urllib if requests isn't
+    installed, so no dependency is strictly required."""
+    body_dict = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
-    }).encode("utf-8")
+    }
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -316,21 +323,50 @@ def _call_openai_compatible(provider_label: str, url: str, api_key: str, model: 
     }
     if extra_headers:
         headers.update(extra_headers)
+    # Free-tier auto-routing can land on a slow backend model; default generous, overridable.
+    timeout = float(os.getenv("HTTP_TIMEOUT_SECONDS", "180"))
+
+    try:
+        import requests as _requests
+    except Exception:
+        _requests = None
 
     def do_request() -> str:
-        req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=120) as http_resp:
-                data = json.loads(http_resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8", errors="ignore")
-            retry_after = e.headers.get("Retry-After") if e.headers else None
-            msg = f"{e.code} {e.reason}. {err_body}"
-            if retry_after:
-                msg += f" | Retry-After header: {retry_after}s"
-            raise RuntimeError(msg)
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"{provider_label} request failed: {e.reason}")
+        if _requests is not None:
+            try:
+                resp = _requests.post(url, json=body_dict, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+                data = resp.json()
+            except _requests.exceptions.HTTPError as e:
+                err_body = e.response.text if e.response is not None else ""
+                retry_after = e.response.headers.get("Retry-After") if e.response is not None else None
+                status = e.response.status_code if e.response is not None else "?"
+                msg = f"{status} {e}. {err_body}"
+                if retry_after:
+                    msg += f" | Retry-After header: {retry_after}s"
+                raise RuntimeError(msg)
+            except _requests.exceptions.RequestException as e:
+                raise RuntimeError(f"{provider_label} request failed: {e}")
+        else:
+            import urllib.request
+            import urllib.error
+            req = urllib.request.Request(url, data=json.dumps(body_dict).encode("utf-8"),
+                                          headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as http_resp:
+                    data = json.loads(http_resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode("utf-8", errors="ignore")
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                msg = f"{e.code} {e.reason}. {err_body}"
+                if retry_after:
+                    msg += f" | Retry-After header: {retry_after}s"
+                raise RuntimeError(msg)
+            except (urllib.error.URLError, OSError, TimeoutError) as e:
+                # OSError/TimeoutError catches raw socket-level errors (connection reset, read
+                # timeout) that don't always get wrapped as URLError by urllib.
+                reason = getattr(e, "reason", e)
+                raise RuntimeError(f"{provider_label} request failed: {reason}")
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
@@ -769,72 +805,49 @@ def generate_chapter_content(c: Course, chapter_number: int, chap: Dict[str, Any
             continue
 
         new_term_count = _merge_chapter_terms(c, chapter_number, proposed_terms)
+
+        if ENABLE_CHAPTER_ENHANCE:
+            try:
+                enhanced = run_chapter_enhancer(c, chapter_body, chapter_number)
+                if enhanced.strip():
+                    chapter_body = enhanced
+                    info(f"[chapter {chapter_number}] Enhancement pass applied (diagrams/polish).")
+            except Exception as e:
+                warn(f"[chapter {chapter_number}] Enhancement call failed ({e}). Keeping the "
+                     f"original draft — nothing lost, just not polished this round.")
+
         # Save the chapter (LaTeX). Kept at drafts/chXX.md so the rest of the pipeline (state
         # tracking, final assembly) doesn't need to change; only the content format changed.
         ch_filename = f"ch{int(chapter_number):02d}.md"
         (c.drafts_path / ch_filename).write_text(chapter_body, encoding="utf-8")
         info(f"[chapter {chapter_number}] Draft written to {c.drafts_path / ch_filename}")
+        info(f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added")
+        _set_chapter_state(c, chapter_number, "complete")
+        return {"status": "complete", "chapter": chapter_number}
 
-        if not ENABLE_CHAPTER_QA:
-            info(f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added")
-            _set_chapter_state(c, chapter_number, "complete")
-            return {"status": "complete", "chapter": chapter_number}
+    # Retries exhausted (the writer call itself kept failing — enhancement never got involved).
+    warn(f"[chapter {chapter_number}] could not be generated after {attempts} attempts ({last_issues}). "
+         f"No draft available — it will be skipped when assembling the final document.")
+    _set_chapter_state(c, chapter_number, "failed")
+    return {"status": "failed", "chapter": chapter_number, "error": str(last_issues)}
 
-        # Optional: per-chapter QA call, only if explicitly enabled.
-        try:
-            qa_result = run_chapter_qa(c, chapter_body, chapter_number)
-        except Exception as e:
-            warn(f"[chapter {chapter_number}] QA call failed ({e}). Keeping the draft as generated.")
-            qa_result = {"status": "PASS", "issues": [], "warnings": [f"QA call failed: {e}"]}
-        if qa_result.get("status") == "PASS":
-            info(f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA passed")
-            _set_chapter_state(c, chapter_number, "complete")
-            return {"status": "complete", "chapter": chapter_number}
-        else:
-            issues = qa_result.get("issues", [])
-            warnings_list = qa_result.get("warnings", [])
-            last_issues = issues if issues else warnings_list
-            info(f"[{chapter_number}/{total_chapters}] {title}\n  - Generated\n  - {new_term_count} new terms added\n  - Chapter QA flagged: {last_issues}")
-            _set_chapter_state(c, chapter_number, "failed")
-            # loop retries if attempts remain
-
-    # Retries exhausted: never kill the run. Keep whatever we have and move on.
-    if chapter_body:
-        warn(f"[chapter {chapter_number}] did not pass QA after {attempts} attempts ({last_issues}). "
-             f"Keeping the last draft and moving on.")
-        _set_chapter_state(c, chapter_number, "complete_with_warnings")
-        return {"status": "complete_with_warnings", "chapter": chapter_number}
-    else:
-        warn(f"[chapter {chapter_number}] could not be generated after {attempts} attempts ({last_issues}). "
-             f"No draft available — it will be skipped when assembling the final document.")
-        _set_chapter_state(c, chapter_number, "failed")
-        return {"status": "failed", "chapter": chapter_number, "error": str(last_issues)}
-
-def run_chapter_qa(c: Course, chapter_markdown: str, chapter_number: Optional[int] = None) -> Dict[str, Any]:
-    template = load_prompt("chapter_qa.txt")
-    outline = load_json(c.outline_path)
-    profile = c.profile_path.read_text(encoding="utf-8")
+def run_chapter_enhancer(c: Course, chapter_body: str, chapter_number: Optional[int] = None) -> str:
+    """Optional second pass (ENABLE_CHAPTER_ENHANCE): actively improves a chapter's LaTeX body
+    and adds ASCII diagrams where they'd help, rather than just validating it. Returns the
+    improved body; raises on failure so the caller can fall back to the original untouched."""
+    template = load_prompt("chapter_enhancer.txt")
     terminology = load_terminology(c.terminology_path)
     context = {
-        "course_profile": profile,
-        "outline_json": outline,
         "terminology_json": terminology,
-        "chapter_markdown": chapter_markdown
+        "chapter_body": chapter_body,
     }
     prompt = render_prompt(template, context)
-    resp = call_llm(prompt, temperature=0.0)
-    # Expect JSON object
-    try:
-        parsed = _extract_json(resp)
-        if not isinstance(parsed, dict):
-            raise ValueError("QA response was not a JSON object")
-        return parsed
-    except Exception:
-        # Save raw — suffixed per-chapter so concurrent chapters don't clobber each other's debug file.
-        suffix = f"_ch{chapter_number:02d}" if chapter_number else ""
-        (c.path / f"chapter_qa_raw{suffix}.txt").write_text(resp, encoding="utf-8")
-        warn(f"Failed to parse chapter QA response as JSON. Saved raw output to chapter_qa_raw{suffix}.txt")
-        return {"status": "FAIL", "issues": ["Invalid QA response format"]}
+    resp = call_llm(prompt, temperature=0.2)
+    # Defensive: strip an accidental document wrapper or \chapter{} line if the model added one.
+    resp = re.sub(r'\\documentclass.*?\\begin\{document\}', '', resp, flags=re.DOTALL)
+    resp = re.sub(r'\\end\{document\}', '', resp)
+    resp = re.sub(r'^\s*\\chapter\{[^}]*\}\s*', '', resp.strip())
+    return resp
 
 def cmd_chapter(course_id: str, chapter_number: int) -> None:
     c = Course.load(course_id)
@@ -999,13 +1012,71 @@ def parse_course_profile_fields(profile_text: str) -> Dict[str, str]:
             fields[key] = value
     return fields
 
-def build_chapter_document(c: Course, chapter_number: int, chapter_title: str, body_fragment: str) -> str:
-    """Deterministically assembles a complete, standalone, compilable LaTeX document for one
-    chapter: exact document class/margins/packages, a title page populated with real course
-    metadata, its own table of contents, and chapter numbering set via \\setcounter{chapter} so
-    it displays correctly (e.g. 11.1, 11.2) even if earlier chapters are missing from this run.
-    The LLM is never responsible for reproducing this scaffolding — only body_fragment (already
-    produced by the chapter writer or the typesetter fallback) comes from the model."""
+def _shared_preamble() -> str:
+    """Packages and typography shared by the front matter and every chapter body, so the whole
+    merged book reads as one consistent document rather than mismatched fragments.
+
+    Typography choices, and why: Latin Modern + \\usepackage{parskip} (spaced, unindented
+    paragraphs, generous margins) is exactly the visual signature of an article/preprint —
+    that's what was making this look thin and paper-like rather than like lecture notes.
+    Palatino (mathpazo) reads noticeably denser and warmer without being "heavy Times", real
+    paragraph indentation instead of vertical gaps reads as a book/notes rather than an
+    article, and tighter list spacing avoids lists eating a disproportionate amount of page
+    space (generated content leans heavily on bullet lists)."""
+    lines = []
+    lines.append("\\documentclass[12pt]{report}\n")
+    lines.append("\\usepackage[top=2.3cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}\n")
+    lines.append("\\usepackage[T1]{fontenc}\n")
+    lines.append("\\usepackage{mathpazo}\n")  # Palatino: denser, warmer textbook serif
+    lines.append("\\linespread{1.03}\n")       # Palatino benefits from a touch of extra leading
+    lines.append("\\usepackage{microtype}\n")
+    lines.append("\\usepackage{graphicx}\n")
+    lines.append("\\usepackage{booktabs}\n")
+    lines.append("\\usepackage{enumitem}\n")
+    lines.append("\\setlist{itemsep=0.15em,topsep=0.35em,parsep=0pt}\n")  # tighter, book-style lists
+    lines.append("\\usepackage{array}\n")
+    lines.append("\\usepackage{float}\n")
+    lines.append("\\usepackage{longtable}\n")
+    lines.append("\\usepackage{tabularx}\n")
+    lines.append("\\usepackage{amsmath}\n")
+    lines.append("\\usepackage{amssymb}\n")
+    # No parskip package: real paragraph indentation, no vertical gaps -- reads as notes, not an article.
+    lines.append("\\setlength{\\parindent}{1.4em}\n")
+    lines.append("\\setlength{\\parskip}{0pt}\n")
+    # hidelinks: fully clickable ToC/links, no coloured borders or boxes around them.
+    lines.append("\\usepackage[hidelinks]{hyperref}\n\n")
+    return "".join(lines)
+
+def build_chapter_body_document(c: Course, chapter_number: int, chapter_title: str, body_fragment: str,
+                                 start_page: Optional[int] = None) -> str:
+    """A complete, standalone, compilable LaTeX document for one chapter's CONTENT ONLY — no
+    title page, no table of contents. These get merged after a separate front-matter document,
+    so the merged result reads as one continuous book rather than N stapled-together documents.
+    Chapter numbering is still set explicitly via \\setcounter{chapter} so it's correct (e.g.
+    11.1, 11.2) even if earlier chapters are missing from this run. start_page, once known (see
+    the two-pass compile in cmd_compile), sets this chapter's own printed page numbers to match
+    its true position in the final merged book rather than restarting at 1 for every chapter.
+    The LLM is never responsible for this scaffolding — only body_fragment (from the chapter
+    writer or typesetter fallback) comes from the model."""
+    chapter_title_escaped = _latex_escape(chapter_title)
+    n = int(chapter_number)
+    doc = [_shared_preamble()]
+    doc.append("\\begin{document}\n")
+    doc.append("\\pagestyle{plain}\n")
+    if start_page is not None:
+        doc.append(f"\\setcounter{{page}}{{{start_page}}}\n")
+    doc.append(f"\\setcounter{{chapter}}{{{n - 1}}}\n")
+    doc.append(f"\\chapter{{{chapter_title_escaped}}}\n\n")
+    doc.append(body_fragment.strip())
+    doc.append("\n\n\\end{document}\n")
+    return "".join(doc)
+
+def build_front_matter_document(c: Course, toc_entries: List[Tuple[int, str, Optional[int]]]) -> str:
+    """The book's title page plus one real table of contents (chapter titles with page numbers)
+    covering every chapter that will be merged in. toc_entries is (chapter_number, title,
+    start_page) — start_page is None on the first pass (used only to measure how many pages the
+    front matter itself takes), then filled in with real numbers on the second pass once that's
+    known (see compile_front_matter)."""
     profile_fields = parse_course_profile_fields(c.profile_path.read_text(encoding="utf-8"))
     course_code = _latex_escape(profile_fields.get("course code", ""))
     course_title = _latex_escape(profile_fields.get("course title", "Lecture Notes"))
@@ -1013,26 +1084,8 @@ def build_chapter_document(c: Course, chapter_number: int, chapter_title: str, b
     university = _latex_escape(profile_fields.get("university", ""))
     academic_session = _latex_escape(profile_fields.get("academic session", ""))
     prepared_by = _latex_escape(profile_fields.get("prepared by", ""))
-    chapter_title_escaped = _latex_escape(chapter_title)
-    n = int(chapter_number)
 
-    doc = []
-    doc.append("\\documentclass[12pt]{report}\n")
-    doc.append("\\usepackage[top=2.5cm,bottom=2.5cm,left=3cm,right=2.5cm]{geometry}\n")
-    doc.append("\\usepackage{lmodern}\n")
-    doc.append("\\usepackage{microtype}\n")
-    doc.append("\\usepackage{graphicx}\n")
-    doc.append("\\usepackage{booktabs}\n")
-    doc.append("\\usepackage{enumitem}\n")
-    doc.append("\\usepackage{array}\n")
-    doc.append("\\usepackage{float}\n")
-    doc.append("\\usepackage{longtable}\n")
-    doc.append("\\usepackage{tabularx}\n")
-    doc.append("\\usepackage{amsmath}\n")
-    doc.append("\\usepackage{amssymb}\n")
-    doc.append("\\usepackage{parskip}\n")
-    # hidelinks: fully clickable ToC/links, no coloured borders or boxes around them.
-    doc.append("\\usepackage[hidelinks]{hyperref}\n\n")
+    doc = [_shared_preamble()]
     doc.append("\\begin{document}\n\n")
     doc.append("\\begin{titlepage}\n")
     doc.append("\\thispagestyle{empty}\n")
@@ -1040,8 +1093,7 @@ def build_chapter_document(c: Course, chapter_number: int, chapter_title: str, b
     doc.append("\\vspace*{2cm}\n")
     doc.append(f"{{\\LARGE {course_title}}}\\\\[1cm]\n")
     doc.append(f"{{\\Large {course_code}}}\\\\[1cm]\n")
-    doc.append("{\\Large Lecture Notes}\\\\[1cm]\n")
-    doc.append(f"{{\\Large Chapter {n}: {chapter_title_escaped}}}\\\\[1.5cm]\n")
+    doc.append("{\\Large Lecture Notes}\\\\[1.5cm]\n")
     doc.append(f"{department}\\\\\n")
     doc.append(f"{university}\\\\\n")
     doc.append(f"{academic_session}\\\\[2cm]\n")
@@ -1050,14 +1102,15 @@ def build_chapter_document(c: Course, chapter_number: int, chapter_title: str, b
     doc.append("\\end{titlepage}\n\n")
     # No headers, plain page numbers starting right after the (unnumbered) title page.
     doc.append("\\pagestyle{plain}\n")
-    doc.append("\\tableofcontents\n")
-    doc.append("\\newpage\n\n")
-    # Chapter counter set explicitly so numbering (and every \section it feeds, e.g. 11.1, 11.2)
-    # is correct regardless of which other chapters exist in this run.
-    doc.append(f"\\setcounter{{chapter}}{{{n - 1}}}\n")
-    doc.append(f"\\chapter{{{chapter_title_escaped}}}\n\n")
-    doc.append(body_fragment.strip())
-    doc.append("\n\n\\end{document}\n")
+    doc.append("\\chapter*{Contents}\n")
+    doc.append("\\addcontentsline{toc}{chapter}{Contents}\n")
+    doc.append("\\vspace{0.5em}\n")
+    doc.append("\\noindent\n")
+    for num, title, start_page in toc_entries:
+        title_escaped = _latex_escape(title)
+        page_str = str(start_page) if start_page is not None else "\\phantom{0}"
+        doc.append(f"Chapter {num}: {title_escaped} \\dotfill\\ {page_str}\\\\[0.6em]\n")
+    doc.append("\n\\end{document}\n")
     return "".join(doc)
 
 def _looks_like_body_fragment(text: str) -> bool:
@@ -1105,11 +1158,16 @@ def get_chapter_body_fragment(c: Course, chapter_number: int) -> Optional[str]:
     resp = re.sub(r'\\documentclass.*?\\begin\{document\}', '', resp, flags=re.DOTALL)
     resp = re.sub(r'\\end\{document\}', '', resp)
     resp = re.sub(r'^\s*\\chapter\{[^}]*\}\s*', '', resp.strip())
+    # Self-healing: write the converted body back so this draft now "looks like" a body fragment
+    # and never triggers this LLM call again on future compiles/resumes.
+    fname.write_text(resp, encoding="utf-8")
     return resp
 
 def compile_chapter_pdf(c: Course, chapter_number: int, chapter_title: str) -> Optional[Path]:
-    """Builds and compiles one chapter into its own standalone PDF. Returns the PDF path on
-    success, None if it couldn't be produced (draft missing, LaTeX error, pdflatex missing)."""
+    """Builds and compiles one chapter's content into its own PDF (no title page/ToC of its own
+    — those live in the separately-compiled front matter). Returns the PDF path on success,
+    None if it couldn't be produced (draft missing, LaTeX error, pdflatex missing). Page numbers
+    start at 1 here — see finalize_chapter_pdf_page_numbers for the corrected final pass."""
     pdf_path = c.tex_path / f"ch{int(chapter_number):02d}.pdf"
     tex_path = c.tex_path / f"ch{int(chapter_number):02d}.tex"
     if pdf_path.exists():
@@ -1119,29 +1177,47 @@ def compile_chapter_pdf(c: Course, chapter_number: int, chapter_title: str) -> O
     body = get_chapter_body_fragment(c, chapter_number)
     if body is None:
         return None
-    document = build_chapter_document(c, chapter_number, chapter_title, body)
+    document = build_chapter_body_document(c, chapter_number, chapter_title, body)
     c.tex_path.mkdir(parents=True, exist_ok=True)
     tex_path.write_text(document, encoding="utf-8")
     info(f"Wrote LaTeX for chapter {chapter_number}: {tex_path}")
+    return _run_pdflatex(c.tex_path, tex_path, pdf_path, error_label=f"chapter {chapter_number}")
 
+def finalize_chapter_pdf_page_numbers(c: Course, chapter_number: int, chapter_title: str, start_page: int) -> Optional[Path]:
+    """Recompiles an already-successfully-compiled chapter with its printed page numbers set to
+    its true position in the merged book (e.g. chapter 2 starting at page 9, not page 1 again).
+    No LLM call — by this point the draft is guaranteed to already be a body fragment (either
+    originally, or self-healed by get_chapter_body_fragment's fallback conversion)."""
+    pdf_path = c.tex_path / f"ch{int(chapter_number):02d}.pdf"
+    tex_path = c.tex_path / f"ch{int(chapter_number):02d}.tex"
+    fname = c.drafts_path / f"ch{int(chapter_number):02d}.md"
+    if not fname.exists():
+        return None
+    body = fname.read_text(encoding="utf-8")
+    document = build_chapter_body_document(c, chapter_number, chapter_title, body, start_page=start_page)
+    tex_path.write_text(document, encoding="utf-8")
+    return _run_pdflatex(c.tex_path, tex_path, pdf_path, error_label=f"chapter {chapter_number}")
+
+def _run_pdflatex(work_dir: Path, tex_path: Path, expected_pdf: Path, error_label: str) -> Optional[Path]:
+    """Runs pdflatex twice (so cross-references resolve) in work_dir and returns the produced
+    PDF path, or None if it couldn't be produced. Shared by chapter and front-matter compiles."""
     if os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes"):
         try:
             from pypdf import PdfWriter
             writer = PdfWriter()
             writer.add_blank_page(width=595, height=842)  # a genuinely valid, mergeable PDF
-            with open(pdf_path, "wb") as f:
+            with open(expected_pdf, "wb") as f:
                 writer.write(f)
             writer.close()
         except Exception:
-            # pypdf not available — fall back to a byte stub (won't merge, but won't crash either)
-            pdf_path.write_bytes(b"%PDF-1.4\n% Dummy per-chapter PDF produced in DRY_RUN mode\n")
-        return pdf_path
+            expected_pdf.write_bytes(b"%PDF-1.4\n% Dummy PDF produced in DRY_RUN mode\n")
+        return expected_pdf
 
     old_cwd = os.getcwd()
     try:
-        os.chdir(c.tex_path)
+        os.chdir(work_dir)
         cmd = ["pdflatex", "-interaction=nonstopmode", tex_path.name]
-        for i in range(2):  # two passes so the table of contents resolves
+        for i in range(2):
             try:
                 res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except FileNotFoundError:
@@ -1150,38 +1226,71 @@ def compile_chapter_pdf(c: Course, chapter_number: int, chapter_title: str) -> O
                      f"still ready at {tex_path}.")
                 return None
             if res.returncode != 0:
-                (c.tex_path / f"ch{int(chapter_number):02d}_error.log").write_bytes(res.stdout + b"\n\n" + res.stderr)
-        built = c.tex_path / f"ch{int(chapter_number):02d}.pdf"
-        if built.exists():
-            info(f"Compiled chapter {chapter_number}: {built}")
-            return built
-        warn(f"Chapter {chapter_number} did not compile to PDF (see ch{int(chapter_number):02d}_error.log "
-             f"in {c.tex_path}). Its LaTeX source is still available for manual fixing.")
+                (tex_path.with_suffix("")).with_name(tex_path.stem + "_error.log").write_bytes(
+                    res.stdout + b"\n\n" + res.stderr)
+        if expected_pdf.exists():
+            info(f"Compiled {error_label}: {expected_pdf}")
+            return expected_pdf
+        warn(f"{error_label.capitalize()} did not compile to PDF (see {tex_path.stem}_error.log "
+             f"in {work_dir}). Its LaTeX source is still available for manual fixing.")
         return None
     finally:
         os.chdir(old_cwd)
 
-def merge_chapter_pdfs(c: Course, chapter_pdfs: List[Path]) -> bool:
-    """Merges already-compiled per-chapter PDFs (in chapter order) into the final course PDF
-    using PDF-level merging — never re-invokes LaTeX, so this step can't itself fail from a
-    LaTeX error. Returns True if a merged PDF was produced."""
-    if not chapter_pdfs:
-        return False
+def compile_front_matter(c: Course, entries: List[Tuple[int, str]], chapter_page_counts: Dict[int, int]) -> Optional[Path]:
+    """Compiles the book's title page + one real, page-numbered table of contents, covering
+    only the chapters that actually compiled successfully. Two-pass: first compile measures how
+    many pages the front matter itself takes, then a second pass fills in correct chapter start
+    pages computed from that plus each chapter's own page count."""
+    front_tex = c.tex_path / "front_matter.tex"
+    front_pdf = c.tex_path / "front_matter.pdf"
+
+    # Pass 1: blank page numbers, just to measure the front matter's own length.
+    draft_entries = [(num, title, None) for num, title in entries]
+    front_tex.write_text(build_front_matter_document(c, draft_entries), encoding="utf-8")
+    pass1_pdf = _run_pdflatex(c.tex_path, front_tex, front_pdf, error_label="front matter (pass 1)")
+    if pass1_pdf is None:
+        return None
+    try:
+        from pypdf import PdfReader
+        front_page_count = len(PdfReader(str(pass1_pdf)).pages)
+    except Exception as e:
+        warn(f"Couldn't measure front matter length ({e}); falling back to a 1-page estimate, "
+             f"so contents page numbers may be off by a page or two.")
+        front_page_count = 1
+
+    # Pass 2: real starting page for each chapter = front matter length + preceding chapters' pages.
+    real_entries = []
+    running_page = front_page_count + 1
+    for num, title in entries:
+        real_entries.append((num, title, running_page))
+        running_page += chapter_page_counts.get(num, 1)
+    front_tex.write_text(build_front_matter_document(c, real_entries), encoding="utf-8")
+    return _run_pdflatex(c.tex_path, front_tex, front_pdf, error_label="front matter")
+
+def assemble_course_pdf(c: Course, front_matter_pdf: Path, chapter_pdfs: List[Tuple[int, str, Path]]) -> bool:
+    """Merges the front matter and every successfully-compiled chapter (in chapter-number order)
+    into one continuous book PDF, with PDF bookmarks for navigation as a bonus. PDF-level
+    merging never re-invokes LaTeX, so this step can't itself fail from a LaTeX error."""
     try:
         from pypdf import PdfWriter
     except Exception:
-        warn("pypdf isn't installed, so per-chapter PDFs can't be merged into one course PDF. "
-             f"Run: pip install pypdf. Your individual chapter PDFs are still in {c.tex_path}.")
+        warn("pypdf isn't installed, so the book can't be assembled into one PDF. "
+             f"Run: pip install pypdf. Individual pieces are still in {c.tex_path}.")
         return False
     writer = PdfWriter()
     try:
-        for pdf in chapter_pdfs:
-            writer.append(str(pdf))
+        writer.append(str(front_matter_pdf))
+        page_cursor = len(writer.pages)
+        for num, title, pdf_path in chapter_pdfs:
+            writer.append(str(pdf_path))
+            writer.add_outline_item(f"Chapter {num}: {title}", page_cursor)
+            page_cursor = len(writer.pages)
         c.output_pdf.parent.mkdir(parents=True, exist_ok=True)
         with open(c.output_pdf, "wb") as f:
             writer.write(f)
     except Exception as e:
-        warn(f"Merging chapter PDFs failed ({e}). Your individual chapter PDFs are still in {c.tex_path}.")
+        warn(f"Assembling the final book failed ({e}). Individual pieces are still in {c.tex_path}.")
         return False
     finally:
         writer.close()
@@ -1196,29 +1305,61 @@ def cmd_compile(course_id: str) -> None:
     outline = load_json(c.outline_path)
     chapters = outline.get("chapters", [])
 
-    chapter_pdfs: List[Path] = []
+    # Pass 1: compile each chapter once (page numbers start at 1, will be corrected in pass 3).
+    chapter_results: List[Tuple[int, str]] = []
+    page_counts: Dict[int, int] = {}
     for ch in chapters:
         num = int(ch.get("number"))
         title = ch.get("title") or f"Chapter {num}"
         pdf = compile_chapter_pdf(c, num, title)
         if pdf:
-            chapter_pdfs.append(pdf)
+            chapter_results.append((num, title))
+            try:
+                from pypdf import PdfReader
+                page_counts[num] = len(PdfReader(str(pdf)).pages)
+            except Exception:
+                page_counts[num] = 1
 
-    if not chapter_pdfs:
+    if not chapter_results:
         warn("No chapters could be compiled to PDF this run. Your chapter drafts are still "
              f"available as markdown/LaTeX in {c.drafts_path} and {c.tex_path}.")
         return
-    if len(chapter_pdfs) < len(chapters):
-        warn(f"Only {len(chapter_pdfs)}/{len(chapters)} chapters compiled; the rest are still "
-             f"available individually where they got to. The merged PDF will only include the "
-             f"{len(chapter_pdfs)} that succeeded.")
+    if len(chapter_results) < len(chapters):
+        warn(f"Only {len(chapter_results)}/{len(chapters)} chapters compiled; the book will only "
+             f"include the ones that succeeded. The rest are still available individually where "
+             f"they got to.")
 
-    if merge_chapter_pdfs(c, chapter_pdfs):
-        info(f"PDF compiled: {c.output_pdf}")
+    # Pass 2: front matter (title page + real page-numbered contents), now that page counts are known.
+    front_matter_pdf = compile_front_matter(c, chapter_results, page_counts)
+    if front_matter_pdf is None:
+        warn("Couldn't build the title page/contents. Individual compiled chapters are still "
+             f"available in {c.tex_path}.")
+        return
+    try:
+        from pypdf import PdfReader
+        front_page_count = len(PdfReader(str(front_matter_pdf)).pages)
+    except Exception:
+        front_page_count = 1
+
+    # Pass 3: recompile each chapter with its true starting page number (no LLM call — the
+    # draft is already a body fragment by this point) so its own printed numbers match the ToC.
+    final_chapter_pdfs: List[Tuple[int, str, Path]] = []
+    running_page = front_page_count + 1
+    for num, title in chapter_results:
+        pdf = finalize_chapter_pdf_page_numbers(c, num, title, running_page)
+        if pdf is None:
+            warn(f"Chapter {num} couldn't be recompiled with corrected page numbers; it'll be "
+                 f"included, but its printed page numbers may not match the contents page.")
+            pdf = c.tex_path / f"ch{num:02d}.pdf"  # fall back to the pass-1 PDF, still present
+        final_chapter_pdfs.append((num, title, pdf))
+        running_page += page_counts.get(num, 1)
+
+    if assemble_course_pdf(c, front_matter_pdf, final_chapter_pdfs):
+        info(f"Book compiled: {c.output_pdf}")
         state["compiled"] = True
         save_json(c.generation_state_path, state)
     else:
-        info(f"Individual chapter PDFs are available in {c.tex_path} even though the merge step didn't complete.")
+        info(f"Individual pieces are available in {c.tex_path} even though final assembly didn't complete.")
 
 def cmd_build(course_id: str) -> None:
     run_pipeline(course_id)

@@ -3,5 +3,7 @@ python-docx>=0.8.11
 PyPDF2>=3.0.0
 pypdf>=4.0.0
 google-genai>=0.2.0
-# No CLI framework dependency: using argparse from stdlib
-# Groq and OpenRouter providers use stdlib urllib, no extra dependency required
+requests>=2.31.0
+# requests is preferred for Groq/OpenRouter calls (handles flaky connections/resets far better
+# than raw urllib, a common source of WinError 10054 on Windows) — falls back to stdlib urllib
+# automatically if it isn't installed, so it's not strictly required.
