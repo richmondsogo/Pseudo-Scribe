@@ -1159,6 +1159,46 @@ def build_front_matter_document(c: Course, toc_entries: List[Tuple[int, str, Opt
     doc.append("\n\\end{document}\n")
     return "".join(doc)
 
+def build_single_book_document(c: Course, chapter_fragments: List[Tuple[int, str, str]]) -> str:
+    """Builds the WHOLE book as one LaTeX document — title page, a REAL \\tableofcontents
+    (which hyperref + hidelinks makes fully clickable with no visible borders), then every
+    chapter body back to back. chapter_fragments is (chapter_number, title, body_fragment).
+    Chapter counters are set explicitly so numbering is correct even when some chapters are
+    skipped; the \\tableofcontents and hyperlinks only cover chapters actually included."""
+    profile_fields = parse_course_profile_fields(c.profile_path.read_text(encoding="utf-8"))
+    course_code = _latex_escape(profile_fields.get("course code", ""))
+    course_title = _latex_escape(profile_fields.get("course title", "Lecture Notes"))
+    department = _latex_escape(profile_fields.get("department", ""))
+    university = _latex_escape(profile_fields.get("university", ""))
+    academic_session = _latex_escape(profile_fields.get("academic session", ""))
+    prepared_by = _latex_escape(profile_fields.get("prepared by", ""))
+
+    doc = [_shared_preamble()]
+    doc.append("\\begin{document}\n")
+    doc.append("\\begin{titlepage}\n")
+    doc.append("\\thispagestyle{empty}\n")
+    doc.append("\\centering\n")
+    doc.append("\\vspace*{2cm}\n")
+    doc.append(f"{{\\LARGE {course_title}}}\\\\[1cm]\n")
+    doc.append(f"{{\\Large {course_code}}}\\\\[1cm]\n")
+    doc.append("{\\Large Lecture Notes}\\\\[1.5cm]\n")
+    doc.append(f"{department}\\\\\n")
+    doc.append(f"{university}\\\\\n")
+    doc.append(f"{academic_session}\\\\[2cm]\n")
+    doc.append("Prepared by\\\\\n")
+    doc.append(f"{prepared_by}\n")
+    doc.append("\\end{titlepage}\n\n")
+    doc.append("\\tableofcontents\n")
+    doc.append("\\newpage\n\n")
+    for num, title, body in chapter_fragments:
+        n = int(num)
+        doc.append(f"\\setcounter{{chapter}}{{{n - 1}}}\n")
+        doc.append(f"\\chapter{{{_latex_escape(title)}}}\n\n")
+        doc.append(body.strip())
+        doc.append("\n\n")
+    doc.append("\\end{document}\n")
+    return "".join(doc)
+
 def _sanitize_latex_percent(text: str) -> str:
     """Escapes bare '%' characters in a LaTeX body fragment to '\\%' — the single most
     common cause of 'chapter came out broken': a %%! literal like '90%' starts a LaTeX
@@ -1310,9 +1350,12 @@ def finalize_chapter_pdf_page_numbers(c: Course, chapter_number: int, chapter_ti
     tex_path.write_text(document, encoding="utf-8")
     return _run_pdflatex(c.tex_path, tex_path, pdf_path, error_label=f"chapter {chapter_number}")
 
-def _run_pdflatex(work_dir: Path, tex_path: Path, expected_pdf: Path, error_label: str) -> Optional[Path]:
-    """Runs pdflatex twice (so cross-references resolve) in work_dir and returns the produced
-    PDF path, or None if it couldn't be produced. Shared by chapter and front-matter compiles."""
+def _run_pdflatex(work_dir: Path, tex_path: Path, expected_pdf: Path, error_label: str, passes: int = 2) -> Optional[Path]:
+    """Runs pdflatex (twice by default so cross-references resolve; a 3-pass run is expected
+    for a book with \tableofcontents and hyperref) in work_dir and returns the produced PDF
+    path, or None if it couldn't be produced. Shared by chapter, front-matter, and book
+    compiles. Extra passes are cheap and aimed at resolving the ToC/labels; the loop stops
+    early once an error is seen so we never stall on 3 failing runs."""
     if os.getenv("DRY_RUN", "").lower() in ("1", "true", "yes"):
         try:
             from pypdf import PdfWriter
@@ -1331,7 +1374,7 @@ def _run_pdflatex(work_dir: Path, tex_path: Path, expected_pdf: Path, error_labe
         cmd = ["pdflatex", "-interaction=nonstopmode", tex_path.name]
         last_output = b""
         res: Optional[subprocess.CompletedProcess] = None
-        for i in range(2):
+        for i in range(passes):
             try:
                 res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             except FileNotFoundError:
@@ -1438,61 +1481,47 @@ def cmd_compile(course_id: str) -> None:
     outline = load_json(c.outline_path)
     chapters = outline.get("chapters", [])
 
-    # Pass 1: compile each chapter once (page numbers start at 1, will be corrected in pass 3).
-    chapter_results: List[Tuple[int, str]] = []
-    page_counts: Dict[int, int] = {}
+    # Single-document build: title page + REAL \\tableofcontents (made clickable by hyperref
+    # with hidelinks — no visible borders) + every chapter body in one document. This is the
+    # only way the contents page is genuinely navigable in the PDF, rather than a hand-drawn
+    # list merged from separately-compiled PDFs.
+    chapter_fragments: List[Tuple[int, str, str]] = []
     for ch in chapters:
         num = int(ch.get("number"))
         title = ch.get("title") or f"Chapter {num}"
-        pdf = compile_chapter_pdf(c, num, title)
-        if pdf:
-            chapter_results.append((num, title))
-            try:
-                from pypdf import PdfReader
-                page_counts[num] = len(PdfReader(str(pdf)).pages)
-            except Exception:
-                page_counts[num] = 1
+        body = get_chapter_body_fragment(c, num)
+        if body is None:
+            warn(f"Chapter {num} couldn't be converted to a LaTeX body fragment; skipping it in "
+                 f"the compiled PDF (its draft is still at {c.drafts_path}).")
+            continue
+        chapter_fragments.append((num, title, body))
 
-    if not chapter_results:
+    if not chapter_fragments:
         warn("No chapters could be compiled to PDF this run. Your chapter drafts are still "
              f"available as markdown/LaTeX in {c.drafts_path} and {c.tex_path}.")
         return
-    if len(chapter_results) < len(chapters):
-        warn(f"Only {len(chapter_results)}/{len(chapters)} chapters compiled; the book will only "
+    if len(chapter_fragments) < len(chapters):
+        warn(f"Only {len(chapter_fragments)}/{len(chapters)} chapters compiled; the book will only "
              f"include the ones that succeeded. The rest are still available individually where "
              f"they got to.")
 
-    # Pass 2: front matter (title page + real page-numbered contents), now that page counts are known.
-    front_matter_pdf = compile_front_matter(c, chapter_results, page_counts)
-    if front_matter_pdf is None:
-        warn("Couldn't build the title page/contents. Individual compiled chapters are still "
-             f"available in {c.tex_path}.")
+    book_document = build_single_book_document(c, chapter_fragments)
+    c.tex_path.mkdir(parents=True, exist_ok=True)
+    main_tex = c.tex_path / "main.tex"
+    main_pdf = c.tex_path / "main.pdf"
+    main_tex.write_text(book_document, encoding="utf-8")
+    info(f"Wrote single-document book LaTeX: {main_tex}")
+
+    # 3 passes: first builds the .toc, second/third resolve page numbers and hyperlink targets.
+    pdf = _run_pdflatex(c.tex_path, main_tex, main_pdf, error_label="book", passes=3)
+    if pdf is None:
+        warn(f"Book PDF didn't compile; LaTeX source is still available at {main_tex}.")
         return
-    try:
-        from pypdf import PdfReader
-        front_page_count = len(PdfReader(str(front_matter_pdf)).pages)
-    except Exception:
-        front_page_count = 1
-
-    # Pass 3: recompile each chapter with its true starting page number (no LLM call — the
-    # draft is already a body fragment by this point) so its own printed numbers match the ToC.
-    final_chapter_pdfs: List[Tuple[int, str, Path]] = []
-    running_page = front_page_count + 1
-    for num, title in chapter_results:
-        pdf = finalize_chapter_pdf_page_numbers(c, num, title, running_page)
-        if pdf is None:
-            warn(f"Chapter {num} couldn't be recompiled with corrected page numbers; it'll be "
-                 f"included, but its printed page numbers may not match the contents page.")
-            pdf = c.tex_path / f"ch{num:02d}.pdf"  # fall back to the pass-1 PDF, still present
-        final_chapter_pdfs.append((num, title, pdf))
-        running_page += page_counts.get(num, 1)
-
-    if assemble_course_pdf(c, front_matter_pdf, final_chapter_pdfs):
-        info(f"Book compiled: {c.output_pdf}")
-        state["compiled"] = True
-        save_json(c.generation_state_path, state)
-    else:
-        info(f"Individual pieces are available in {c.tex_path} even though final assembly didn't complete.")
+    c.output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    pdf.replace(c.output_pdf)
+    info(f"Book compiled: {c.output_pdf}")
+    state["compiled"] = True
+    save_json(c.generation_state_path, state)
 
 def cmd_build(course_id: str) -> None:
     run_pipeline(course_id)
