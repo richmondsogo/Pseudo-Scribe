@@ -679,8 +679,17 @@ def cmd_terminology(course_id: str) -> None:
     info(f"Terminology extraction complete. {added} new terms added.")
 
 # Parse LLM chapter generation output into terminology and chapter
-def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
-    # Expect [TERMINOLOGY] ... [/TERMINOLOGY] and [CHAPTER] ... [/CHAPTER]
+def parse_generation_output(text: Optional[str]) -> Tuple[Dict[str, Any], str]:
+    """Parse an LLM chapter response into (proposed_terms, chapter_body).
+
+    Expects [TERMINOLOGY] ... [/TERMINOLOGY] and [CHAPTER] ... [/CHAPTER]. Defensive
+    against real-world model output: a None response (returned as an empty generation),
+    a model closing the chapter with \\end{CHAPTER} instead of [/CHAPTER], and a raw
+    [TERMINOLOGY] JSON block that leaked into the chapter body."""
+    if not text:
+        return {}, ""
+    # Normalize a stray LaTeX-style close to the expected marker, then parse.
+    text = text.replace("\\end{CHAPTER}", "[/CHAPTER]")
     term_start = text.find("[TERMINOLOGY]")
     term_end = text.find("[/TERMINOLOGY]")
     chap_start = text.find("[CHAPTER]")
@@ -705,7 +714,39 @@ def parse_generation_output(text: str) -> Tuple[Dict[str, Any], str]:
     else:
         # If markers not present, assume whole response is chapter
         chapter = text.strip()
+    # Self-heal: strip a [TERMINOLOGY] block that leaked into the chapter body.
+    leaked_start = chapter.find("[TERMINOLOGY]")
+    leaked_end = chapter.find("[/TERMINOLOGY]")
+    if leaked_start != -1 and leaked_end != -1:
+        chapter = (chapter[:leaked_start] + chapter[leaked_end + len("[/TERMINOLOGY]"):]).strip()
     return terms, chapter
+
+def _looks_like_usable_chapter_body(text: str) -> bool:
+    """Returns True only if an LLM response looks like a real chapter draft rather than a
+    refusal ("User Safety: safe", "I can't help with that"), a one-liner, or raw markdown.
+    Requires at least one LaTeX \\section-level command, no leftover delimiter markers, and a
+    minimum plausible length (a real chapter has several paragraphs)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Any leftover outer delimiters mean the response wasn't parsed cleanly.
+    if "[TERMINOLOGY]" in t or "[CHAPTER]" in t or "[/CHAPTER]" in t:
+        return False
+    # Refusal / safety-guard / placeholder one-liners.
+    low = t.lower()
+    refusal_markers = (
+        "user safety:", "i can't help", "i cannot help", "i am unable",
+        "i'm unable", "as an ai", "i apologize", "sorry, i",
+        "i don't have enough", "cannot assist", "can't assist",
+    )
+    if any(marker in low for marker in refusal_markers):
+        return False
+    if len(t) < 250:
+        return False
+    # Must actually be LaTeX: a \section (or subsection/subsubsection/tutorial) command.
+    if not re.search(r'\\(section|subsection|subsubsection|section\*)\s*\{', t):
+        return False
+    return True
 
 def _set_chapter_state(c: Course, chapter_number: int, status: str) -> None:
     """Thread-safe read-modify-write of generation_state.json's per-chapter status."""
@@ -801,6 +842,16 @@ def generate_chapter_content(c: Course, chapter_number: int, chap: Dict[str, Any
         if not chapter_body.strip():
             last_issues = "Response had no usable chapter content"
             warn(f"[chapter {chapter_number}] attempt {attempts} produced no chapter content; retrying.")
+            chapter_body = None
+            continue
+        # Refusal / degenerate-response guard: a one-line or non-LaTeX response
+        # ("User Safety: safe", "I can't help with that", raw markdown, ...) must never
+        # be saved as a chapter. Require real \section (or other LaTeX) structure and
+        # a minimum plausible length before accepting it as a draft.
+        if not _looks_like_usable_chapter_body(chapter_body):
+            last_issues = f"Response was not a usable LaTeX chapter body: {chapter_body[:200]!r}"
+            warn(f"[chapter {chapter_number}] attempt {attempts} was rejected as a refusal or "
+                 f"degenerate response; retrying.")
             chapter_body = None
             continue
 
@@ -1016,19 +1067,16 @@ def _shared_preamble() -> str:
     """Packages and typography shared by the front matter and every chapter body, so the whole
     merged book reads as one consistent document rather than mismatched fragments.
 
-    Typography choices, and why: Latin Modern + \\usepackage{parskip} (spaced, unindented
-    paragraphs, generous margins) is exactly the visual signature of an article/preprint —
-    that's what was making this look thin and paper-like rather than like lecture notes.
-    Palatino (mathpazo) reads noticeably denser and warmer without being "heavy Times", real
-    paragraph indentation instead of vertical gaps reads as a book/notes rather than an
-    article, and tighter list spacing avoids lists eating a disproportionate amount of page
-    space (generated content leans heavily on bullet lists)."""
+    Typography choices, and why: Latin Modern (lmodern) gives a clean textbook serif — not the
+    heavy Times look — while parskip provides spaced, unindented paragraphs that read as modern
+    lecture notes rather than a cramped article. Tight list spacing via enumitem keeps lists from
+    eating a disproportionate amount of page space (generated content leans heavily on bullet
+    lists)."""
     lines = []
     lines.append("\\documentclass[12pt]{report}\n")
     lines.append("\\usepackage[top=2.3cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}\n")
     lines.append("\\usepackage[T1]{fontenc}\n")
-    lines.append("\\usepackage{mathpazo}\n")  # Palatino: denser, warmer textbook serif
-    lines.append("\\linespread{1.03}\n")       # Palatino benefits from a touch of extra leading
+    lines.append("\\usepackage{lmodern}\n")  # Latin Modern: clean textbook serif, not heavy Times
     lines.append("\\usepackage{microtype}\n")
     lines.append("\\usepackage{graphicx}\n")
     lines.append("\\usepackage{booktabs}\n")
@@ -1040,9 +1088,7 @@ def _shared_preamble() -> str:
     lines.append("\\usepackage{tabularx}\n")
     lines.append("\\usepackage{amsmath}\n")
     lines.append("\\usepackage{amssymb}\n")
-    # No parskip package: real paragraph indentation, no vertical gaps -- reads as notes, not an article.
-    lines.append("\\setlength{\\parindent}{1.4em}\n")
-    lines.append("\\setlength{\\parskip}{0pt}\n")
+    lines.append("\\usepackage{parskip}\n")  # spaced, unseparated unindented paragraphs: clean textbook style
     # hidelinks: fully clickable ToC/links, no coloured borders or boxes around them.
     lines.append("\\usepackage[hidelinks]{hyperref}\n\n")
     return "".join(lines)
@@ -1113,6 +1159,53 @@ def build_front_matter_document(c: Course, toc_entries: List[Tuple[int, str, Opt
     doc.append("\n\\end{document}\n")
     return "".join(doc)
 
+def _sanitize_latex_percent(text: str) -> str:
+    """Escapes bare '%' characters in a LaTeX body fragment to '\\%' — the single most
+    common cause of 'chapter came out broken': a %%! literal like '90%' starts a LaTeX
+    comment that silently truncates the rest of that line. Everything inside \\begin{verbatim}
+    ... \\end{verbatim} blocks is left untouched (ASCII diagrams use % in cell separators)."""
+    lines = text.split("\n")
+    out = []
+    in_verbatim = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("\\begin{verbatim}"):
+            in_verbatim = True
+        if not in_verbatim:
+            line = line.replace("%", r"\%")
+        if stripped.startswith("\\end{verbatim}"):
+            in_verbatim = False
+        out.append(line)
+    return "\n".join(out)
+
+
+def _strip_stray_delimiters(text: str) -> str:
+    """Self-heal: strip leftover [TERMINOLOGY]...[/TERMINOLOGY] and [CHAPTER]...[/CHAPTER]
+    blocks from an existing draft (written by older versions that saved raw delimiters)."""
+    t = text
+    # Strip [TERMINOLOGY]...[/TERMINOLOGY] blocks (possibly multiple).
+    while "[TERMINOLOGY]" in t and "[/TERMINOLOGY]" in t:
+        start = t.find("[TERMINOLOGY]")
+        end = t.find("[/TERMINOLOGY]") + len("[/TERMINOLOGY]")
+        t = (t[:start] + t[end:]).strip()
+    # Strip a [CHAPTER]...[/CHAPTER] wrapper if present.
+    if "[CHAPTER]" in t and "[/CHAPTER]" in t:
+        start = t.find("[CHAPTER]")
+        end = t.rfind("[/CHAPTER]")
+        end = end + len("[/CHAPTER]") if end != -1 else len(t)
+        inner = t[start + len("[CHAPTER]"):end]
+        if "[TERMINOLOGY]" not in inner:
+            t = inner.strip()
+    # Defensive: remove any lone leftover markers (e.g. a trailing [/CHAPTER] whose
+    # opening tag was already consumed).
+    t = (t.replace("[CHAPTER]", "")
+          .replace("[/CHAPTER]", "")
+          .replace("[TERMINOLOGY]", "")
+          .replace("[/TERMINOLOGY]", "")
+          .strip())
+    return t
+
+
 def _looks_like_body_fragment(text: str) -> bool:
     """Detects whether a draft is already a LaTeX body fragment (written directly by the
     current chapter_writer.txt — starts with \\section, no \\chapter/\\documentclass) vs.
@@ -1126,15 +1219,29 @@ def _looks_like_body_fragment(text: str) -> bool:
 def get_chapter_body_fragment(c: Course, chapter_number: int) -> Optional[str]:
     """Returns the LaTeX body fragment for a chapter — directly, with no LLM call, if the draft
     was already written as one; otherwise converts an older-format draft via one LLM call
-    (routed through HEAVY_CALL_PROVIDER if set). Returns None if it can't produce one."""
+    (routed through HEAVY_CALL_PROVIDER if set). Returns None if it can't produce one.
+    Self-heals existing junk drafts: strips stray [TERMINOLOGY]/[CHAPTER] delimiters, escapes
+    bare '%' characters (outside verbatim), and refuses one-line refusal content."""
     fname = c.drafts_path / f"ch{int(chapter_number):02d}.md"
     if not fname.exists():
         warn(f"No draft for chapter {chapter_number}; skipping it in the compiled PDF.")
         return None
     draft_content = fname.read_text(encoding="utf-8")
 
-    if _looks_like_body_fragment(draft_content):
-        return draft_content  # no LLM call needed
+    # Self-heal legacy drafts that saved raw delimiter markers.
+    cleaned = _strip_stray_delimiters(draft_content)
+
+    # A draft that is just a refusal / one-liner / raw markdown is not usable.
+    if not _looks_like_usable_chapter_body(cleaned):
+        warn(f"Chapter {chapter_number} draft is not a usable LaTeX body fragment "
+             f"(maybe an older refusal or markdown draft). Keeping it as-is instead of "
+             f"feeding it to the PDF; {fname} can be regenerated with "
+             f"'python generate.py chapter {c.id} {chapter_number}'.")
+        return None
+
+    if _looks_like_body_fragment(cleaned):
+        cleaned = _sanitize_latex_percent(cleaned)
+        return cleaned  # no LLM call needed
 
     # Fallback: older Markdown (or old \chapter{}-prefixed) drafts get converted to a bare
     # body fragment. One-time cost per such chapter.
@@ -1194,6 +1301,11 @@ def finalize_chapter_pdf_page_numbers(c: Course, chapter_number: int, chapter_ti
     if not fname.exists():
         return None
     body = fname.read_text(encoding="utf-8")
+    # Same self-heal/sanitize as get_chapter_body_fragment so the final page-number pass
+    # never reintroduces a bare % or stray delimiters that the first pass already cleaned.
+    body = _strip_stray_delimiters(body)
+    if _looks_like_body_fragment(body):
+        body = _sanitize_latex_percent(body)
     document = build_chapter_body_document(c, chapter_number, chapter_title, body, start_page=start_page)
     tex_path.write_text(document, encoding="utf-8")
     return _run_pdflatex(c.tex_path, tex_path, pdf_path, error_label=f"chapter {chapter_number}")
@@ -1217,6 +1329,8 @@ def _run_pdflatex(work_dir: Path, tex_path: Path, expected_pdf: Path, error_labe
     try:
         os.chdir(work_dir)
         cmd = ["pdflatex", "-interaction=nonstopmode", tex_path.name]
+        last_output = b""
+        res: Optional[subprocess.CompletedProcess] = None
         for i in range(2):
             try:
                 res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1225,9 +1339,28 @@ def _run_pdflatex(work_dir: Path, tex_path: Path, expected_pdf: Path, error_labe
                      "(e.g. MiKTeX on Windows, TeX Live on macOS/Linux) — your LaTeX source is "
                      f"still ready at {tex_path}.")
                 return None
+            last_output = res.stdout + b"\n" + res.stderr
             if res.returncode != 0:
-                (tex_path.with_suffix("")).with_name(tex_path.stem + "_error.log").write_bytes(
-                    res.stdout + b"\n\n" + res.stderr)
+                (tex_path.with_suffix("")).with_name(tex_path.stem + "_error.log").write_bytes(last_output)
+        # nonstopmode doesn't always set a nonzero exit code even when real LaTeX errors occur
+        # (e.g. an unescaped '%' silently truncating a table row). Scan the log for genuine
+        # error lines ('! ...') rather than trusting the exit status alone.
+        log_text = (last_output or b"").decode("utf-8", errors="replace")
+        error_lines = [
+            ln.strip() for ln in log_text.splitlines()
+            if ln.strip().startswith("!")
+            and "Emergency stop" not in ln
+            and "==> Fatal error occurred" not in ln
+        ]
+        if error_lines or (res is not None and res.returncode != 0):
+            error_log = tex_path.with_suffix(".error.log")
+            error_log.write_bytes(last_output)
+            status_desc = error_lines[0] if error_lines else (
+                f"exit code {res.returncode}" if res is not None else "unknown"
+            )
+            warn(f"LaTeX error compiling {error_label}: {status_desc}. "
+                 f"See {error_log} for the full log. The .tex source is kept for manual fixing.")
+            return None
         if expected_pdf.exists():
             info(f"Compiled {error_label}: {expected_pdf}")
             return expected_pdf
@@ -1246,7 +1379,7 @@ def compile_front_matter(c: Course, entries: List[Tuple[int, str]], chapter_page
     front_pdf = c.tex_path / "front_matter.pdf"
 
     # Pass 1: blank page numbers, just to measure the front matter's own length.
-    draft_entries = [(num, title, None) for num, title in entries]
+    draft_entries: List[Tuple[int, str, Optional[int]]] = [(num, title, None) for num, title in entries]
     front_tex.write_text(build_front_matter_document(c, draft_entries), encoding="utf-8")
     pass1_pdf = _run_pdflatex(c.tex_path, front_tex, front_pdf, error_label="front matter (pass 1)")
     if pass1_pdf is None:
@@ -1505,9 +1638,23 @@ TEACHABLE CHAPTERS the lecture notes should be organized into.
 
 Course outlines typically mix together things like:
 - Learning Outcomes (a numbered list of things students should be able to do) — these describe
-  goals, NOT chapters. Do not turn each learning outcome into its own chapter.
+  goals, NOT chapters. Do not turn each learning outcome into its own chapter. Never use a
+  learning outcome as a chapter title.
 - Course Contents / Course Description (the actual topics to be taught) — this is what chapters
   should be built from.
+
+Rules for chapter titles:
+- A title must be a SHORT NOUN PHRASE describing a topic, e.g. "Memory Management",
+  "Linked Lists", "Process Scheduling", "File Systems". It must NOT start with a verb like
+  "discuss", "apply", "implement", "choose", "analyse", "evaluate", "understand", "explain" —
+  those are learning outcomes, not chapter titles.
+- If the outline only contains learning outcomes and no separate course content, derive the
+  chapters FROM THE TOPIC WORDS inside the outcomes. Example: an outcome reading "discuss the
+  appropriate use of built-in data structures" becomes a chapter titled "Built-in Data
+  Structures", with topic "arrays, dynamic arrays, tuples, dictionaries, sets, hash maps".
+- Strip trailing punctuation (semicolons, commas, 'and', 'or') from titles.
+- Capitalize titles as proper nouns.
+- Never copy a sentence fragment verbatim as a title.
 
 Break the taught content into a logical sequence of chapters. Group closely related short topics
 into one chapter; split large topic lists into multiple chapters where they're distinct enough to
@@ -1536,8 +1683,9 @@ Raw outline text:
         for i, ch in enumerate(chapters_raw, start=1):
             if not isinstance(ch, dict):
                 continue
+            raw_num = ch.get("number")
             try:
-                num = int(ch.get("number"))
+                num = int(raw_num) if raw_num is not None else i
             except (TypeError, ValueError):
                 num = i
             title = str(ch.get("title") or f"Chapter {num}").strip() or f"Chapter {num}"

@@ -3,33 +3,38 @@
   "course_title": "Data Structures",
   "department": "Computer Science",
   "university": "Osun State University",
-  "academic_session": "2026/2027",
+  "academic_session": "2025/2026",
   "level": "300",
   "chapters": [
     {
       "number": 1,
-      "title": "Data Types and Memory Representation",
-      "topic": "Primitive types, data representation in memory"
+      "title": "discuss the appropriate use of built-in data structures;",
+      "topic": ""
     },
     {
       "number": 2,
-      "title": "Pointers and Memory Management",
-      "topic": "Pointers and references, stack and heap allocation, run time storage management"
+      "title": "apply object-oriented concepts (inheritance, polymorphism, design patterns, etc.) in",
+      "topic": ""
     },
     {
       "number": 3,
-      "title": "Basic Data Structures: Arrays, Records, and Strings",
-      "topic": "Arrays, records, strings and string processing"
+      "title": "implement various data structures and their algorithms, and apply them in implementing",
+      "topic": ""
     },
     {
       "number": 4,
-      "title": "Stacks, Queues, and Linked Structures",
-      "topic": "Stacks, queues, linked structures, implementation strategies for stacks and queues"
+      "title": "choose the appropriate data structure for modelling a given problem;",
+      "topic": ""
     },
     {
       "number": 5,
-      "title": "Tree Data Structures",
-      "topic": "Trees, implementation strategies for trees"
+      "title": "analyse simple algorithms and determine their efficiency using big-O notation; and",
+      "topic": ""
+    },
+    {
+      "number": 6,
+      "title": "apply the knowledge of data structures to other application domains like data compression",
+      "topic": ""
     }
   ],
   "prepared_by": "Tunde Sardine"

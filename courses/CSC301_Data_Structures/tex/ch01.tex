@@ -1,144 +1,268 @@
 \documentclass[12pt]{report}
-\usepackage[top=2.5cm,bottom=2.5cm,left=3cm,right=2.5cm]{geometry}
-\usepackage{lmodern}
+\usepackage[top=2.3cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{mathpazo}
+\linespread{1.03}
 \usepackage{microtype}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{enumitem}
+\setlist{itemsep=0.15em,topsep=0.35em,parsep=0pt}
 \usepackage{array}
 \usepackage{float}
 \usepackage{longtable}
 \usepackage{tabularx}
 \usepackage{amsmath}
 \usepackage{amssymb}
-\usepackage{parskip}
+\setlength{\parindent}{1.4em}
+\setlength{\parskip}{0pt}
 \usepackage[hidelinks]{hyperref}
 
 \begin{document}
-
-\begin{titlepage}
-\thispagestyle{empty}
-\centering
-\vspace*{2cm}
-{\LARGE Data Structures}\\[1cm]
-{\Large CSC 301}\\[1cm]
-{\Large Lecture Notes}\\[1cm]
-{\Large Chapter 1: Data Types and Memory Representation}\\[1.5cm]
-Computer Science\\
-Osun State University\\
-2026/2027\\[2cm]
-Prepared by\\
-Tunde Sardine
-\end{titlepage}
-
 \pagestyle{plain}
-\tableofcontents
-\newpage
-
+\setcounter{page}{3}
 \setcounter{chapter}{0}
-\chapter{Data Types and Memory Representation}
+\chapter{discuss the appropriate use of built-in data structures;}
 
-\section{Introduction}
-\label{sec:intro}
-Data structures are built upon the fundamental data types provided by a programming language and the way these types are represented in computer memory. Understanding primitive data types and their memory representation is essential for designing efficient data structures and algorithms. This chapter introduces the basic building blocks of data --- primitive types --- and examines how they are stored, addressed, and organized in memory.
+Computer programs manipulate data to solve real-world problems. The organization of data in computer memory directly dictates how efficiently algorithms can access, search, insert, and delete records. High-level programming languages provide \textbf{built-in data structures}, which are pre-packaged, highly optimized collection types supported natively by the language runtime and standard library.
 
-\section{Primitive Data Types}
-\label{sec:primitive}
-\emph{Primitive Data Types} are the basic data types directly supported by a programming language. They represent simple values and are not composed of other types. Common categories include integers, floating-point numbers, characters, and booleans.
+Understanding the underlying mechanics of built-in data structures is vital for software performance and correctness. Selecting an inappropriate structure, such as using a dynamic array for frequent membership checks across millions of records, can transform a sub-second operation into an execution bottleneck lasting minutes. Knowing when to utilize each built-in structure enables engineers to write clean, performant code without reinventing common data management patterns.
 
-\subsection{Integer Types}
-\label{subsec:integer}
-Integer types represent whole numbers. They vary in size (number of bits) and whether they are signed or unsigned. Typical sizes are 8, 16, 32, and 64 bits. Signed integers use the most significant bit as a sign bit; the most common representation for negative values is \textbf{Two's Complement} (see Section~\ref{subsec:twos_complement}).
+This chapter examines the core built-in data structures found across modern high-level programming languages, including static arrays, dynamic arrays, tuples, dictionaries, and sets. It analyzes their physical memory layouts, operational time complexities, and behavioral trade-offs. Mastering these foundational structures provides the essential context required for object-oriented data structure design and formal algorithm analysis in subsequent chapters.
 
-\subsection{Floating-Point Types}
-\label{subsec:float}
-Floating-point types represent real numbers with fractional parts. They follow the \textbf{IEEE 754} standard, which defines single precision (32 bits) and double precision (64 bits) formats. A floating-point number consists of a sign bit, an exponent, and a mantissa (significand).
+\section{Memory Layout and Fundamental Characteristics}
 
-\subsection{Character Types}
-\label{subsec:char}
-Character types store individual characters. Historically, a single byte (8 bits) was used with the ASCII encoding (0--127). Modern systems use Unicode, which may require multiple bytes per character (e.g., UTF-8, UTF-16).
+Built-in data structures organize data in physical system memory according to specific layout paradigms. These paradigms govern how memory is allocated, accessed, and modified during program execution.
 
-\subsection{Boolean Types}
-\label{subsec:bool}
-Boolean types represent logical values: \texttt{true} and \texttt{false}. They are typically stored as a single byte or even a single bit when packed into larger structures.
+\subsection{Contiguous versus Non-Contiguous Allocation}
 
-\section{Memory Representation}
-\label{sec:memory_rep}
-\emph{Memory Representation} refers to how data values are encoded as bits and organized in the addressable memory of a computer. Key concepts include binary encoding, memory addressing, endianness, and alignment.
+Memory allocation strategies are broadly divided into contiguous and non-contiguous arrangements. A \textbf{contiguous memory allocation} reserves a single, uninterrupted block of physical memory addresses for storing data elements. Because elements sit directly adjacent to one another, the memory address of the $i$-th element can be calculated directly from the base memory address of the structure using constant time address arithmetic:
 
-\subsection{Binary Representation}
-\label{subsec:binary}
-All data in a digital computer is ultimately represented as sequences of bits (0 and 1). The interpretation of a bit pattern depends on the data type. For example, the 8-bit pattern \texttt{01000001} can represent the integer 65, the character 'A' in ASCII, or a fragment of a larger value.
+\begin{equation}
+\text{Address}(i) = \text{Base Address} + (i \times \text{Element Size})
+\end{equation}
 
-\subsection{Memory Addressing}
-\label{subsec:addressing}
-Memory is organized as a sequence of addressable units, typically bytes (8 bits). Each byte has a unique address. Multi-byte data types occupy consecutive addresses. The address of a variable is the address of its first byte.
+In contrast, non-contiguous memory allocation distributes data elements across arbitrary memory locations linked together via memory pointers. While non-contiguous structures facilitate dynamic resizing without reallocating full blocks, they lose the ability to perform constant-time random access by integer index and incur additional pointer overhead.
 
-\subsection{Endianness}
-\label{subsec:endianness}
-When a multi-byte value is stored in memory, the order of bytes matters. In \textbf{big-endian} systems, the most significant byte is stored at the lowest address. In \textbf{little-endian} systems, the least significant byte is stored at the lowest address. Most modern processors (x86, ARM) use little-endian, but network protocols often use big-endian (network byte order).
+\subsection{Mutability and Structural Invariance}
+
+Data structures are classified by whether their contents or dimensions can change after initialization. A \textbf{mutable} structure allows modification, addition, or removal of elements in place without allocating a new structure in memory. Dynamic arrays and dictionaries are primary examples of mutable built-in structures.
+
+An \textbf{immutable} structure cannot be modified once created. Any transformation applied to an immutable structure creates a completely new instance in memory. Immutability provides inherent thread safety and guarantees structural invariance, making immutable built-in structures like tuples ideal for read-only configurations, dictionary keys, and concurrent execution contexts.
 
 \begin{verbatim}
-Example: 32-bit integer 0x12345678 stored at address 0x1000
+Static Array Layout (Fixed Memory Block = 4 Elements):
++-----------------+-----------------+-----------------+-----------------+
+| Address: 0x1000 | Address: 0x1004 | Address: 0x1008 | Address: 0x100C |
+| Index: 0        | Index: 1        | Index: 2        | Index: 3        |
+| Value: 42       | Value: 87       | Value: 15       | Value: 93       |
++-----------------+-----------------+-----------------+-----------------+
 
-Big-endian:
-Address: 0x1000 0x1001 0x1002 0x1003
-Byte:    0x12   0x34   0x56   0x78
-
-Little-endian:
-Address: 0x1000 0x1001 0x1002 0x1003
-Byte:    0x78   0x56   0x34   0x12
+Dynamic Array Layout (Logical Size = 3, Allocated Capacity = 6):
++-------+-------+-------+-------------------+-------------------+-------------------+
+| Ind: 0| Ind: 1| Ind: 2| Unallocated Space | Unallocated Space | Unallocated Space |
+| Val: A| Val: B| Val: C| (Reserved Buffer) | (Reserved Buffer) | (Reserved Buffer) |
++-------+-------+-------+-------------------+-------------------+-------------------+
+^ Base Pointer           ^ Next Insertion Point
 \end{verbatim}
 
-\subsection{Memory Alignment and Padding}
-\label{subsec:alignment}
-Many architectures require that data of size $n$ bytes be stored at addresses that are multiples of $n$ (e.g., a 4-byte integer at an address divisible by 4). This is called \textbf{Memory Alignment}. To satisfy alignment, compilers may insert \textbf{Padding} bytes between structure fields or at the end of a structure. Padding increases memory usage but can improve access speed and prevent hardware exceptions.
+\section{Linear Built-in Data Structures}
 
-\section{Data Representation in Memory}
-\label{sec:data_rep}
-This section details the specific bit-level representation of common primitive types.
+Linear data structures maintain a sequential ordering among their elements, where each element has a distinct predecessor and successor (except for the boundary elements).
 
-\subsection{Two's Complement Representation}
-\label{subsec:twos_complement}
-\textbf{Two's Complement} is the standard method for representing signed integers. For an $n$-bit number, the range is $[-2^{n-1}, 2^{n-1}-1]$. To negate a number, invert all bits and add 1. This representation allows addition and subtraction to be performed identically for signed and unsigned operands.
+\subsection{Static Arrays}
 
-Example (8-bit):
+A static \textbf{array} is a fixed-size, contiguous sequence of elements of a single uniform data type. The total capacity of a static array must be known at allocation time and cannot grow or shrink during program execution.
+
+Because all elements share identical byte sizes, static arrays support direct constant-time indexed access, denoted as $O(1)$. However, inserting or deleting elements at arbitrary positions requires shifting subsequent elements, resulting in linear time complexity, $O(n)$, where $n$ is the number of elements.
+
+\subsection{Dynamic Arrays}
+
+A \textbf{dynamic array} provides contiguous sequential storage similar to a static array but automatically resizes itself when capacity is exhausted. Popular high-level language implementations include Python \texttt{list}, Java \texttt{ArrayList}, and C++ \texttt{std::vector}.
+
+To minimize the overhead of frequent allocations, dynamic arrays utilize a growth factor strategy. When an element is added to a full array, the underlying execution environment performs the following sequence:
+\begin{enumerate}
+    \item Allocates a new contiguous memory block, typically twice the size of the existing block (growth factor of 2).
+    \item Copies all existing elements from the old memory block to the new memory block.
+    \item Releases the old memory block back to the system allocator.
+    \item Inserts the new element into the next available slot.
+\end{enumerate}
+
+\begin{verbatim}
+Dynamic Array Growth and Reallocation Sequence:
+
+Step 1: Array is Full (Capacity = 4, Size = 4)
++---+---+---+---+
+| A | B | C | D |  (Old Memory Block)
++---+---+---+---+
+
+Step 2: Append 'E' triggers allocation of new expanded block (Capacity = 8)
++---+---+---+---+---+---+---+---+
+|   |   |   |   |   |   |   |   |  (New Memory Block)
++---+---+---+---+---+---+---+---+
+
+Step 3: Copy existing elements and insert 'E'
++---+---+---+---+---+---+---+---+
+| A | B | C | D | E |   |   |   |  (Size = 5, Capacity = 8)
++---+---+---+---+---+---+---+---+
+                 ^ Next Insertion Point
+
+Step 4: Release old memory block back to heap allocator
+\end{verbatim}
+
+Although individual resizing operations require $O(n)$ copy operations, amortized analysis proves that appending an element to a dynamic array executes in $O(1)$ time on average over a sequence of appends.
+
+\subsection{Tuples}
+
+A \textbf{tuple} is an ordered, immutable collection of elements. Unlike standard static arrays, tuples can store heterogeneous data types across their slots while maintaining fixed positional semantics.
+
+Because tuples are immutable, the runtime allocates exact memory blocks with zero dynamic overhead or growth buffers. This makes tuples memory-efficient and faster to instantiate than dynamic arrays. Tuples are predominantly used to group related data fields together (such as database rows or multi-value function returns) without creating custom class abstractions.
+
+\section{Associative and Set Structures}
+
+Associative and set structures organize data based on logical keys or content values rather than sequential integer positioning.
+
+\subsection{Dictionaries and Hash Maps}
+
+A \textbf{dictionary} (also called a hash map or associative array) is an unordered collection of key-value pairs, where each key must be unique and immutable. Dictionaries allow programs to retrieve values rapidly using their associated keys rather than scanning through an entire dataset sequentially.
+
+Internally, dictionaries rely on a mathematical function called a \textbf{hash function}. The hash function accepts a key as input and computes an integer hash code, which maps directly to a specific slot (bucket) within an underlying array.
+
+\begin{verbatim}
+Dictionary Hash-Based Lookup Mechanism:
+
+Key: "OSUN_ID_402"
+       |
+       v
+[ Hash Function ]  ====> Computed Bucket Index: 3
+       |
+       v
+Underlying Bucket Array:
++---+------------------------------------+
+| 0 | Empty                              |
++---+------------------------------------+
+| 1 | Key: "OSUN_ID_101" -> Value: "A+"  |
++---+------------------------------------+
+| 2 | Empty                              |
++---+------------------------------------+
+| 3 | Key: "OSUN_ID_402" -> Value: "B"   |  <=== Match Found (O(1) Access)
++---+------------------------------------+
+\end{verbatim}
+
+When two distinct keys produce the same bucket index, a hash collision occurs. Dictionaries resolve collisions using collision handling strategies such as \textbf{chaining} (maintaining a linked list per bucket) or \textbf{open addressing} (probing subsequent array slots). When a high-quality hash function is used, search, insertion, and deletion operations execute in $O(1)$ average time complexity.
+
+\subsection{Sets}
+
+A \textbf{set} is an unordered collection of unique elements. Sets mirror the mathematical properties of set theory, preventing duplicate values from existing within the same container.
+
+Most language libraries implement sets using hash table backends (where elements serve as keys mapped to dummy values) or balanced search trees. Hash-based set implementations offer $O(1)$ average time complexity for insertion, deletion, and membership testing. Sets also provide direct, built-in operations for union ($\cup$), intersection ($\cap$), and difference ($\setminus$).
+
+\section{Comparative Performance Analysis and Selection Criteria}
+
+Choosing the correct built-in data structure requires balancing time complexity, space overhead, and programmatic constraints. Table~\ref{tab:builtin_comparison} summarizes the asymptotic operational characteristics of fundamental built-in data structures.
+
+\begin{table}[htbp]
+\centering
+\caption{Operational Complexity and Characteristics of Built-in Data Structures}
+\label{tab:builtin_comparison}
+\begin{tabularx}{\textwidth}{@{} l c c >{\raggedright\arraybackslash}p{2.5cm} X @{}}
+\toprule
+\textbf{Data Structure} & \textbf{Access by Index} & \textbf{Search by Value} & \textbf{Insertion / Deletion} & \textbf{Primary Use Case} \\
+\midrule
+Static Array & $O(1)$ & $O(n)$ & $O(n)$ & Fixed-size numeric or fixed-length sequences. \\
+Dynamic Array & $O(1)$ & $O(n)$ & $O(1)$ Amortized (at end) & General-purpose ordered sequences with variable size. \\
+Tuple & $O(1)$ & $O(n)$ & Not Supported (Immutable) & Fixed multi-attribute records and composite lookup keys. \\
+Dictionary & Not Supported & $O(1)$ Average & $O(1)$ Average & Rapid key-value lookups and relational mapping. \\
+Set & Not Supported & $O(1)$ Average & $O(1)$ Average & Uniqueness enforcement and fast membership checks. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+To determine the optimal data structure for a given task, consider the following structural decision pipeline:
+
+\begin{verbatim}
+Structural Selection Decision Tree:
+
+                    [ Select Structure ]
+                             |
+             Does data consist of Key-Value pairs?
+                    /                 \
+                 (Yes)                (No)
+                  /                     \
+            [Dictionary]      Must duplicates be excluded?
+                                    /           \
+                                 (Yes)          (No)
+                                  /               \
+                               [Set]       Is collection size/content fixed?
+                                                /              \
+                                             (Yes)             (No)
+                                              /                  \
+                                      [Static Array /       [Dynamic Array]
+                                           Tuple]
+\end{verbatim}
+
+\begin{enumerate}
+    \item \textbf{Identity versus Association:} If data items are indexed by natural sequential integers, select a dynamic array or static array. If data items are retrieved via unique identifiers (strings, UUIDs, compound keys), select a dictionary.
+    \item \textbf{Uniqueness Requirements:} If duplicate elements must be filtered out automatically or membership tests occur frequently, select a set.
+    \item \textbf{Mutability Constraints:} If the collection must remain fixed after creation to prevent accidental modification, select a tuple.
+    \item \textbf{Access Pattern Optimization:} If elements are accessed via arbitrary integer positions, prioritize linear contiguous structures to leverage hardware CPU cache lines.
+\end{enumerate}
+
+\section{Worked Examples}
+
+The following concrete engineering scenarios illustrate how to evaluate and select built-in data structures based on performance requirements.
+
+\subsection{Worked Example 1: Efficient Student Record Management}
+
+\textbf{Problem Statement:} A university registrar system receives continuous batches of student records. The system must perform two core tasks efficiently:
+\begin{enumerate}
+    \item Retrieve student details instantly given a unique 8-digit Student Identification Number (Matric Number).
+    \item Maintain a log of incoming records in the exact order they arrive for auditing purposes.
+\end{enumerate}
+
+\textbf{Analysis and Solution:}
+Using a dynamic array for Task 1 requires scanning elements sequentially, yielding an $O(n)$ search time. For 100,000 students, scanning the array repeatedly creates severe performance penalties.
+
+To achieve optimal performance, the system should combine two complementary built-in structures:
 \begin{itemize}
-  \item $+5$: \texttt{00000101}
-  \item $-5$: invert \texttt{00000101} $\to$ \texttt{11111010}, add 1 $\to$ \texttt{11111011}
+    \item \textbf{Dictionary for Fast Lookups:} Map each unique Matric Number (string key) to the corresponding student record object (value). This provides $O(1)$ average time retrieval for Task 1.
+    \item \textbf{Dynamic Array for Audit Logging:} Append incoming student record references sequentially to a dynamic array. This preserves insertion order and completes Task 2 in $O(1)$ amortized time per insertion.
 \end{itemize}
 
-\subsection{IEEE 754 Floating-Point Representation}
-\label{subsec:ieee754}
-The \textbf{IEEE 754} standard defines:
-\begin{itemize}
-  \item \textbf{Single precision (32 bits)}: 1 sign bit, 8 exponent bits (bias 127), 23 mantissa bits.
-  \item \textbf{Double precision (64 bits)}: 1 sign bit, 11 exponent bits (bias 1023), 52 mantissa bits.
-\end{itemize}
-The value is $(-1)^{\text{sign}} \times 1.\text{mantissa} \times 2^{\text{exponent}-\text{bias}}$. Special values include zero, infinity, and NaN (Not a Number).
+\subsection{Worked Example 2: Filtering Duplicate IP Addresses}
 
-\subsection{Character Encoding}
-\label{subsec:char_enc}
-\begin{itemize}
-  \item \textbf{ASCII}: 7-bit code (0--127) for English characters, often stored in 8 bits with the high bit zero.
-  \item \textbf{UTF-8}: Variable-length encoding (1 to 4 bytes) for Unicode, backward compatible with ASCII.
-  \item \textbf{UTF-16}: 2 or 4 bytes per character, used in some systems (e.g., Java, Windows).
-\end{itemize}
+\textbf{Problem Statement:} A web server security daemon processes a log stream containing 10,000,000 IP address records. The log contains many repeating IP addresses. The daemon must compute the exact number of unique IP addresses present in the log and check whether specific suspicious IP addresses are present.
 
-\section{Conclusion}
-\label{sec:conclusion}
-Primitive data types and their memory representation form the foundation upon which all data structures are built. The choice of representation affects the range and precision of values, memory consumption, and performance. Understanding binary encoding, endianness, alignment, and standards like Two's Complement and IEEE 754 enables programmers to make informed decisions when designing data structures and to avoid subtle bugs related to data representation.
+\textbf{Analysis and Solution:}
+If a dynamic array is used, checking if an IP address is already recorded requires searching through existing elements, taking $O(k)$ time for an array of size $k$. Building the unique list across $n$ log entries takes $O(n^2)$ total operations:
+
+\[
+\text{Total Operations} = \sum_{k=1}^{n} k = \frac{n(n + 1)}{2} \approx 5 \times 10^{13} \text{ operations}
+\]
+
+By choosing a \textbf{Set} structure instead:
+\begin{enumerate}
+    \item Each IP address string is inserted into the set. The set hashes the string and performs insertion in $O(1)$ average time. Duplicates are discarded automatically.
+    \item Total time complexity to process $n$ entries drops to $O(n)$, executing roughly $10^7$ operations instead of $5 \times 10^{13}$.
+    \item Subsequent queries checking whether a suspicious IP exists execute in $O(1)$ average time.
+\end{enumerate}
+
+\section{Summary and Next Steps}
+
+Built-in data structures form the essential execution foundation of software applications. Arrays and dynamic arrays provide fast index-based positional access; tuples enforce immutability and record integrity; dictionaries enable constant-time key-based lookup; and sets optimize uniqueness checking and set-theoretic operations. Choosing the appropriate structure based on temporal and spatial complexity prevents severe performance bottlenecks.
+
+While built-in data structures solve standard data management problems, complex domains often demand domain-specific data structures with customized behavior. The next chapter introduces object-oriented programming concepts, demonstrating how encapsulation, inheritance, and polymorphism enable engineers to build robust, custom data abstractions.
 
 \section*{Tutorial Questions}
+
 \begin{enumerate}
-  \item List the four main categories of primitive data types and give a typical size (in bits) for each.
-  \item Explain the difference between signed and unsigned integer types. What is the range of an 8-bit signed integer in Two's Complement representation?
-  \item Describe the Three components of an IEEE 754 single-precision floating-point number. What is the bias for the exponent?
-  \item Compare big-endian and little-endian byte ordering. Show how the 32-bit hexadecimal value \texttt{0xDEADBEEF} would be stored in memory starting at address \texttt{0x2000} for each endianness.
-  \item What is memory alignment? Why might a compiler insert padding bytes into a structure?
-  \item Given the 8-bit Two's Complement representation \texttt{11110110}, what decimal value does it represent? Show your work.
-  \item A structure contains a \texttt{char} (1 byte), an \texttt{int} (4 bytes), and a \texttt{short} (2 bytes) in that order. Assuming 4-byte alignment for \texttt{int} and 2-byte alignment for \texttt{short}, draw the memory layout including any padding bytes. What is the total size of the structure?
-  \item Why is the Two's Complement representation preferred over sign-magnitude for signed integers in modern computers?
+    \item Explain the fundamental memory organization difference between contiguous and non-contiguous data structures. Identify how this difference impacts index-based element access time.
+    \item A software developer uses a dynamic array to store historical transaction records. Describe the internal steps taken by the runtime environment when an item is added to a dynamic array that has reached its maximum allocated capacity. What is the amortized time complexity of this operation?
+    \item Compare and contrast a tuple and a dynamic array across three distinct technical dimensions: memory allocation efficiency, mutability, and primary software usage cases.
+    \item An application performs frequent membership queries ("does item $X$ exist in collection $C$?") on a dataset containing 2,000,000 records. Evaluate the operational efficiency of performing this query using a dynamic array versus a set. Provide big-O notation complexities for both approaches.
+    \item Explain how a dictionary achieves $O(1)$ average time complexity for value retrieval. What condition causes this performance to degrade to $O(n)$, and how do modern hashing implementations mitigate this risk?
+    \item A system tracks live vehicle positions using geographical coordinate pairs (latitude, longitude). These coordinates must be updated continuously, but specific route history checkpoints must remain permanent and unalterable. Recommend the built-in data structure best suited for storing live coordinates versus permanent route checkpoints, justifying your selection for each.
+    \item Analyze the computational complexity trade-offs involved when using a static array versus a dynamic array in a memory-constrained embedded system with known, fixed bounds.
 \end{enumerate}
 
 \end{document}

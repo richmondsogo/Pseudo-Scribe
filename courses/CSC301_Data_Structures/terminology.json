@@ -1,148 +1,226 @@
 {
   "terms": {
-    "primitive_data_types": {
-      "preferred_term": "Primitive Data Types",
-      "definition": "Basic data types such as integers, characters, and booleans that are directly supported by the programming language.",
-      "definition_status": "defined",
-      "introduced_in": 1
-    },
-    "memory_representation": {
-      "preferred_term": "Memory Representation",
-      "definition": "The way data is stored and organized in computer memory, including binary encoding and address allocation.",
-      "definition_status": "defined",
-      "introduced_in": 1
-    },
-    "pointers": {
-      "preferred_term": "Pointers",
-      "definition": "Variables that store memory addresses of other variables or data structures.",
-      "definition_status": "defined",
-      "introduced_in": 2
-    },
-    "references": {
-      "preferred_term": "References",
-      "definition": "High-level language constructs that provide an indirect way to access memory locations, similar to pointers.",
-      "definition_status": "defined",
-      "introduced_in": 2
-    },
-    "stack_allocation": {
-      "preferred_term": "Stack Allocation",
-      "definition": "Memory allocation strategy where data is stored in a last-in, first-out (LIFO) stack structure, typically used for function calls and local variables.",
-      "definition_status": "defined",
-      "introduced_in": 2
-    },
-    "heap_allocation": {
-      "preferred_term": "Heap Allocation",
-      "definition": "Dynamic memory allocation strategy where memory is allocated and deallocated in an unordered fashion, typically used for objects and data with variable lifetimes.",
-      "definition_status": "defined",
-      "introduced_in": 2
-    },
-    "run_time_storage_management": {
-      "preferred_term": "Run-Time Storage Management",
-      "definition": "The process of allocating and deallocating memory during program execution, including garbage collection and manual memory management.",
-      "definition_status": "defined",
-      "introduced_in": 2
-    },
-    "arrays": {
-      "preferred_term": "Arrays",
-      "definition": "A collection of elements stored in contiguous memory locations, accessible by index.",
-      "definition_status": "defined",
-      "introduced_in": 3
-    },
-    "records": {
-      "preferred_term": "Records",
-      "definition": "A composite data structure that groups together fields of different data types, often used to represent structured data.",
-      "definition_status": "defined",
-      "introduced_in": 3
-    },
-    "strings": {
-      "preferred_term": "Strings",
-      "definition": "A sequence of characters used to represent text, often stored as arrays of characters.",
-      "definition_status": "defined",
-      "introduced_in": 3
-    },
-    "string_processing": {
-      "preferred_term": "String Processing",
-      "definition": "Operations and algorithms for manipulating text data, including searching, sorting, and pattern matching.",
-      "definition_status": "defined",
-      "introduced_in": 3
-    },
-    "stacks": {
-      "preferred_term": "Stacks",
-      "definition": "A linear data structure that follows the last-in, first-out (LIFO) principle, supporting push and pop operations.",
-      "definition_status": "defined",
-      "introduced_in": 4
-    },
-    "queues": {
-      "preferred_term": "Queues",
-      "definition": "A linear data structure that follows the first-in, first-out (FIFO) principle, supporting enqueue and dequeue operations.",
-      "definition_status": "defined",
-      "introduced_in": 4
-    },
-    "linked_structures": {
-      "preferred_term": "Linked Structures",
-      "definition": "Data structures composed of nodes connected by pointers, allowing dynamic memory allocation and non-contiguous storage.",
-      "definition_status": "defined",
-      "introduced_in": 4
-    },
-    "implementation_strategies_stacks_queues": {
-      "preferred_term": "Implementation Strategies for Stacks and Queues",
+    "built_in_data_structures": {
+      "preferred_term": "built-in data structures",
       "definition": null,
       "definition_status": "undefined",
-      "introduced_in": 4
+      "introduced_in": 1
     },
-    "trees": {
-      "preferred_term": "Trees",
-      "definition": "A hierarchical data structure consisting of nodes connected by edges, with a single root node and child nodes forming subtrees.",
-      "definition_status": "defined",
-      "introduced_in": 5
+    "inheritance": {
+      "preferred_term": "inheritance",
+      "definition": null,
+      "definition_status": "undefined",
+      "introduced_in": 2
     },
-    "implementation_strategies_trees": {
-      "preferred_term": "Implementation Strategies for Trees",
+    "polymorphism": {
+      "preferred_term": "polymorphism",
+      "definition": null,
+      "definition_status": "undefined",
+      "introduced_in": 2
+    },
+    "design_patterns": {
+      "preferred_term": "design patterns",
+      "definition": null,
+      "definition_status": "undefined",
+      "introduced_in": 2
+    },
+    "big_o_notation": {
+      "preferred_term": "big-O notation",
       "definition": null,
       "definition_status": "undefined",
       "introduced_in": 5
     },
-    "Two's Complement": {
-      "preferred_term": "Two's Complement",
-      "definition": "A method for representing signed integers in binary where the most significant bit indicates the sign, and negative numbers are represented by inverting all bits and adding one.",
+    "data_compression": {
+      "preferred_term": "data compression",
+      "definition": null,
+      "definition_status": "undefined",
+      "introduced_in": 6
+    },
+    "array": {
+      "preferred_term": "array",
+      "definition": "A contiguous block of memory storing elements of identical data type accessible via integer indices.",
       "definition_status": "defined",
       "introduced_in": 1
     },
-    "IEEE 754": {
-      "preferred_term": "IEEE 754",
-      "definition": "A standard for floating-point arithmetic that defines formats for representing real numbers, including single precision (32-bit) and double precision (64-bit).",
+    "dynamic array": {
+      "preferred_term": "dynamic array",
+      "definition": "A variable-size list structure backed by a contiguous array that resizes automatically when capacity is reached.",
       "definition_status": "defined",
       "introduced_in": 1
     },
-    "Endianness": {
-      "preferred_term": "Endianness",
-      "definition": "The order in which bytes are stored in memory for multi-byte data types, either most significant byte first (big-endian) or least significant byte first (little-endian).",
+    "dictionary": {
+      "preferred_term": "dictionary",
+      "definition": "An associative data structure that stores unique key-value pairs for constant or near-constant time lookups.",
       "definition_status": "defined",
       "introduced_in": 1
     },
-    "Memory Alignment": {
-      "preferred_term": "Memory Alignment",
-      "definition": "The requirement that data objects be stored at memory addresses that are multiples of their size, which can affect performance and correctness on some architectures.",
+    "set": {
+      "preferred_term": "set",
+      "definition": "An unordered collection of unique elements optimized for fast membership testing.",
       "definition_status": "defined",
       "introduced_in": 1
     },
-    "Padding": {
-      "preferred_term": "Padding",
-      "definition": "Extra bytes inserted between data fields or at the end of a structure to satisfy memory alignment requirements.",
+    "tuple": {
+      "preferred_term": "tuple",
+      "definition": "An immutable, ordered sequence of elements stored in fixed contiguous memory locations.",
       "definition_status": "defined",
       "introduced_in": 1
     },
-    "Linked List": {
-      "preferred_term": "Linked List",
-      "definition": "A linear data structure composed of nodes, each containing data and a reference to the next node, enabling dynamic, non‑contiguous storage.",
+    "design patterns": {
+      "preferred_term": "design patterns",
+      "definition": "Reusable, generalized solutions to common architectural and software design problems within a given context.",
+      "definition_status": "defined",
+      "introduced_in": 2
+    },
+    "abstract data type": {
+      "preferred_term": "abstract data type",
+      "definition": "A mathematical specification of a data structure that defines operations and behavior independently of any specific implementation.",
+      "definition_status": "defined",
+      "introduced_in": 2
+    },
+    "iterator pattern": {
+      "preferred_term": "iterator pattern",
+      "definition": "A behavioral design pattern that provides a standardized mechanism to sequentially traverse elements of an aggregate object without exposing its internal representation.",
+      "definition_status": "defined",
+      "introduced_in": 2
+    },
+    "factory pattern": {
+      "preferred_term": "factory pattern",
+      "definition": "A creational design pattern that uses dedicated methods or objects to encapsulate element or structure creation logic.",
+      "definition_status": "defined",
+      "introduced_in": 2
+    },
+    "strategy pattern": {
+      "preferred_term": "strategy pattern",
+      "definition": "A behavioral design pattern that encapsulates interchangeable algorithms into separate classes, allowing algorithmic behavior to be selected at runtime.",
+      "definition_status": "defined",
+      "introduced_in": 2
+    },
+    "adapter pattern": {
+      "preferred_term": "adapter pattern",
+      "definition": "A structural design pattern that translates the interface of an existing class into another interface expected by a client.",
+      "definition_status": "defined",
+      "introduced_in": 2
+    },
+    "singly linked list": {
+      "preferred_term": "singly linked list",
+      "definition": "A linear data structure where each node contains a data field and a reference link to the next node in the sequence.",
+      "definition_status": "defined",
+      "introduced_in": 3
+    },
+    "doubly linked list": {
+      "preferred_term": "doubly linked list",
+      "definition": "A linear data structure where each node contains data, a reference link to the next node, and a reference link to the previous node.",
+      "definition_status": "defined",
+      "introduced_in": 3
+    },
+    "stack": {
+      "preferred_term": "stack",
+      "definition": "A linear data structure operating under a Last-In, First-Out (LIFO) protocol.",
+      "definition_status": "defined",
+      "introduced_in": 3
+    },
+    "queue": {
+      "preferred_term": "queue",
+      "definition": "A linear data structure operating under a First-In, First-Out (FIFO) protocol.",
+      "definition_status": "defined",
+      "introduced_in": 3
+    },
+    "binary search tree": {
+      "preferred_term": "binary search tree",
+      "definition": "A node-based binary tree data structure where the left subtree contains nodes with keys less than the node key, and the right subtree contains nodes with keys greater.",
+      "definition_status": "defined",
+      "introduced_in": 3
+    },
+    "hash table": {
+      "preferred_term": "hash table",
+      "definition": "A data structure that maps keys to values using a hash function to compute an index into an array of buckets or slots.",
+      "definition_status": "defined",
+      "introduced_in": 3
+    },
+    "time-space trade-off": {
+      "preferred_term": "time-space trade-off",
+      "definition": "The principle where an algorithm or data structure reduces execution time at the cost of consuming additional memory, or vice versa.",
       "definition_status": "defined",
       "introduced_in": 4
     },
-    "Node": {
-      "preferred_term": "Node",
-      "definition": "An individual element in a linked structure, typically comprising data and a pointer/reference to the next (and possibly previous) node.",
+    "priority queue": {
+      "preferred_term": "priority queue",
+      "definition": "An abstract data type where each element has an associated priority, and elements with higher priority are served before elements with lower priority.",
       "definition_status": "defined",
       "introduced_in": 4
+    },
+    "cache locality": {
+      "preferred_term": "cache locality",
+      "definition": "The spatial or temporal proximity of memory accesses that enables efficient utilization of hardware cache memory.",
+      "definition_status": "defined",
+      "introduced_in": 4
+    },
+    "asymptotic analysis": {
+      "preferred_term": "asymptotic analysis",
+      "definition": "A method of defining the limiting behavior of an algorithm's resource consumption as the input size approaches infinity.",
+      "definition_status": "defined",
+      "introduced_in": 5
+    },
+    "worst-case time complexity": {
+      "preferred_term": "worst-case time complexity",
+      "definition": "The maximum execution time required by an algorithm over all possible inputs of size n.",
+      "definition_status": "defined",
+      "introduced_in": 5
+    },
+    "best-case time complexity": {
+      "preferred_term": "best-case time complexity",
+      "definition": "The minimum execution time required by an algorithm over all possible inputs of size n.",
+      "definition_status": "defined",
+      "introduced_in": 5
+    },
+    "average-case time complexity": {
+      "preferred_term": "average-case time complexity",
+      "definition": "The expected execution time required by an algorithm averaged over all possible inputs of size n.",
+      "definition_status": "defined",
+      "introduced_in": 5
+    },
+    "auxiliary space": {
+      "preferred_term": "auxiliary space",
+      "definition": "The temporary or extra memory allocated by an algorithm during execution, excluding the space occupied by the input data.",
+      "definition_status": "defined",
+      "introduced_in": 5
+    },
+    "recurrence relation": {
+      "preferred_term": "recurrence relation",
+      "definition": "An equation or inequality that defines a function in terms of its values on smaller inputs, used to analyze recursive algorithms.",
+      "definition_status": "defined",
+      "introduced_in": 5
+    },
+    "Huffman coding": {
+      "preferred_term": "Huffman coding",
+      "definition": "A lossless data compression algorithm that constructs an optimal prefix code tree using a priority queue based on symbol frequencies.",
+      "definition_status": "defined",
+      "introduced_in": 6
+    },
+    "prefix code": {
+      "preferred_term": "prefix code",
+      "definition": "A code system in which no valid code word is a prefix of any other valid code word, allowing unambiguous sequential decoding.",
+      "definition_status": "defined",
+      "introduced_in": 6
+    },
+    "least recently used cache": {
+      "preferred_term": "least recently used cache",
+      "definition": "An in-memory caching mechanism that evicts the least recently accessed item when capacity is reached, implemented using a hash table and a doubly linked list.",
+      "definition_status": "defined",
+      "introduced_in": 6
+    },
+    "inverted index": {
+      "preferred_term": "inverted index",
+      "definition": "A search index mapping distinct terms to lists of document identifiers or positions where those terms occur.",
+      "definition_status": "defined",
+      "introduced_in": 6
+    },
+    "trie": {
+      "preferred_term": "trie",
+      "definition": "A tree-like search data structure used for efficient storage and retrieval of keys where nodes represent common prefixes.",
+      "definition_status": "defined",
+      "introduced_in": 6
     }
   }
 }

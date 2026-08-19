@@ -1,94 +1,381 @@
 \documentclass[12pt]{report}
-\usepackage[top=2.5cm,bottom=2.5cm,left=3cm,right=2.5cm]{geometry}
-\usepackage{lmodern}
+\usepackage[top=2.3cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{mathpazo}
+\linespread{1.03}
 \usepackage{microtype}
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{enumitem}
+\setlist{itemsep=0.15em,topsep=0.35em,parsep=0pt}
 \usepackage{array}
 \usepackage{float}
 \usepackage{longtable}
 \usepackage{tabularx}
 \usepackage{amsmath}
 \usepackage{amssymb}
-\usepackage{parskip}
+\setlength{\parindent}{1.4em}
+\setlength{\parskip}{0pt}
 \usepackage[hidelinks]{hyperref}
 
 \begin{document}
-
-\begin{titlepage}
-\thispagestyle{empty}
-\centering
-\vspace*{2cm}
-{\LARGE Data Structures}\\[1cm]
-{\Large CSC 301}\\[1cm]
-{\Large Lecture Notes}\\[1cm]
-{\Large Chapter 3: Basic Data Structures: Arrays, Records, and Strings}\\[1.5cm]
-Computer Science\\
-Osun State University\\
-2026/2027\\[2cm]
-Prepared by\\
-Tunde Sardine
-\end{titlepage}
-
 \pagestyle{plain}
-\tableofcontents
-\newpage
-
+\setcounter{page}{20}
 \setcounter{chapter}{2}
-\chapter{Basic Data Structures: Arrays, Records, and Strings}
+\chapter{implement various data structures and their algorithms, and apply them in implementing}
 
-[TERMINOLOGY]
-{}
-[/TERMINOLOGY]
+Building upon the abstract data types and object-oriented design patterns introduced in prior chapters, software systems require concrete underlying implementations to manage memory and execute operations efficiently. While high-level programming environments provide built-in data structures, constructing these structures directly exposes fundamental trade-offs between memory layout, access overhead, and algorithmic complexity.
 
-[CHAPTER]
-\section{Introduction}
+This chapter examines the internal mechanics, structural implementations, and algorithmic operations of core data structures: linked lists, stacks, queues, binary search trees, and hash tables. Mastering these low-level implementations provides the operational insight needed to evaluate execution bottlenecks, avoid hidden overheads, and build custom data organizations for complex software applications.
 
-This chapter introduces three fundamental data structures that serve as the building blocks for more complex structures: \textbf{Arrays}, \textbf{Records}, and \textbf{Strings}. Each of these structures provides a distinct way to organize and access data in memory, and each is closely tied to the underlying memory representation of the data it holds. Understanding these structures is essential before proceeding to the linked structures, stacks, queues, and trees discussed in later chapters.
+\section{Pointer-Based Linear Structures: Linked Lists}
 
-\subsection{Arrays}
+Linear data structures organize elements in a sequential order. Arrays allocate contiguous blocks of memory, whereas pointer-based lists distribute elements dynamically across non-contiguous physical memory locations.
 
-An \textbf{array} is a collection of elements stored in contiguous memory locations, where each element can be accessed directly by its index. The index is typically an integer that ranges from zero to one less than the total number of elements. Because the elements are stored contiguously, the address of any element can be computed in constant time using the base address of the array and the index of the desired element.
+\subsection{Singly Linked Lists}
 
-For example, consider an array of five integers. The element at index zero occupies the first memory location, the element at index one occupies the next, and so on. This layout allows random access to any element in constant time, denoted as $O(1)$. However, the size of a static array is fixed at the time of creation, and inserting or removing elements in the middle of the array requires shifting subsequent elements, which takes linear time.
+A \textbf{singly linked list} consists of a sequence of nodes where each node contains two distinct fields: a data element and a reference pointer to the next node in the sequence. The structure is anchored by a \texttt{head} pointer that points to the first node. The terminal node contains a \texttt{null} reference to signal the end of the list.
 
-Arrays can be allocated on the stack or on the heap. Stack allocation is suitable for arrays whose size is known at compile time and whose lifetime is limited to the scope in which they are declared. Heap allocation is used when the size is not known until run time or when the array must outlive the function that created it.
+\begin{verbatim}
+Singly Linked List Memory Layout:
 
-\subsection{Records}
+ +------+------+    +------+------+    +------+------+
+ | Data | Next |--->| Data | Next |--->| Data | Null |
+ +------+------+    +------+------+    +------+------+
+   ^
+   |
+ Head
+\end{verbatim}
 
-A \textbf{record} is a composite data structure that groups together a fixed number of fields, each of which may have a different data type. Unlike an array, where all elements share the same type, a record allows heterogeneous data to be stored together under a single name. Each field within a record is identified by a name or a tag, and the fields are accessed individually rather than by a numeric index.
+Primary operations on a singly linked list operate via pointer manipulation:
+\begin{itemize}
+    \item \textbf{Insertion at Head}: A new node is allocated, its \texttt{next} pointer is directed to the current \texttt{head}, and the \texttt{head} pointer is updated to point to the new node. This operates in $O(1)$ constant time.
+    \item \textbf{Traversal and Search}: Accessing an element at index $k$ requires traversing $k$ pointer references sequentially starting from \texttt{head}. This operation requires $O(n)$ linear time.
+    \item \textbf{Deletion}: Removing a target node requires updating the \texttt{next} pointer of its preceding node to bypass the target node and point directly to the target node's successor. Locating the predecessor requires $O(n)$ search time, but the link modification itself is $O(1)$.
+\end{itemize}
 
-For instance, a record representing a student might contain a field for the student's name, a field for the student's age, and a field for the student's grade point average. The fields are stored in a fixed order, and the memory layout of the record is determined by the order and types of its fields. Memory alignment and padding may be applied to ensure that each field begins at an address that is a multiple of its size, which can affect the total size of the record.
+\subsection{Doubly Linked Lists}
 
-Records are useful for modeling real-world entities that have multiple attributes. They are sometimes referred to as structs in certain programming languages, but the underlying concept remains the same.
+A \textbf{doubly linked list} expands the node design by incorporating two pointers per node: a \texttt{next} pointer referencing the successor node and a \texttt{prev} pointer referencing the predecessor node. A \texttt{tail} pointer is maintained alongside the \texttt{head} pointer to anchor both ends of the structure.
 
-\subsection{Strings}
+\begin{verbatim}
+Doubly Linked List Memory Layout:
 
-A \textbf{string} is a sequence of characters used to represent text. In most programming languages, strings are stored as arrays of characters, with an additional convention to mark the end of the sequence. In some languages, a special null character is appended to the end of the character array to indicate termination. In other languages, the length of the string is stored separately as part of the string object.
+       +------+------+------+    +------+------+------+
+Null <-| Prev | Data | Next |<---| Prev | Data | Next |---> Null
+       +------+------+------+--->+------+------+------+
+         ^                          ^
+         |                          |
+        Head                       Tail
+\end{verbatim}
 
-Strings can be either mutable or immutable. In a mutable string, the characters can be modified after the string is created. In an immutable string, any operation that appears to modify the string actually creates a new string object. The choice between mutability and immutability affects both the performance and the safety of string operations.
+Bidirectional pointers eliminate the need to traverse from the head when searching for a preceding node during deletion. Given a direct pointer reference to a node $P$ within a doubly linked list, $P$ can be removed in $O(1)$ time by setting $P.\texttt{prev}.\texttt{next} = P.\texttt{next}$ and $P.\texttt{next}.\texttt{prev} = P.\texttt{prev}$. However, this additional pointer maintenance increases the per-node dynamic memory overhead.
 
-\subsection{String Processing}
+\subsection{Worked Example: Deletion in a Doubly Linked List}
 
-\textbf{String processing} refers to the set of operations and algorithms used to manipulate and analyze text data. Common operations include concatenation, which joins two strings into one; substring extraction, which retrieves a contiguous portion of a string; and searching, which locates a pattern within a string. More advanced operations include pattern matching using regular expressions, sorting of collections of strings, and transformation of text according to specified rules.
+Consider a doubly linked list containing nodes $A \leftrightarrow B \leftrightarrow C$. To delete target node $B$:
+\begin{enumerate}
+    \item Access node $A$ via $B.\texttt{prev}$ and node $C$ via $B.\texttt{next}$.
+    \item Update node $A$'s forward reference: $A.\texttt{next} \leftarrow C$.
+    \item Update node $C$'s backward reference: $C.\texttt{prev} \leftarrow A$.
+    \item Clear node $B$'s internal pointers: $B.\texttt{next} \leftarrow \texttt{null}$, $B.\texttt{prev} \leftarrow \texttt{null}$.
+    \item Release memory allocated for node $B$.
+\end{enumerate}
 
-Many programming languages provide built-in functions or library routines for these operations. For example, a concatenation function might take two strings as input and return a new string that contains the characters of the first followed by the characters of the second. A search function might take a string and a pattern as input and return the index at which the pattern first appears in the string.
+\section{Restricted Linear Structures: Stacks and Queues}
 
-\subsection{Conclusion}
+Stacks and queues apply specific constraints to element access and ordering, abstracting insertion and removal into well-defined interface behaviors.
 
-Arrays, records, and strings are foundational data structures that provide efficient ways to store and access collections of data. Arrays offer constant-time indexed access to elements of the same type. Records allow heterogeneous data to be grouped under a single name. Strings provide a specialized representation for text that supports a rich set of processing operations. Together, these structures form the basis for the more advanced data structures that are explored in subsequent chapters.
+\subsection{Stacks}
+
+A \textbf{stack} is a linear data structure operating under a Last-In, First-Out (LIFO) protocol. Elements can only be added or removed from a single end, designated as the top of the stack.
+
+The core operations are:
+\begin{itemize}
+    \item \texttt{push(item)}: Places a new item onto the top of the stack.
+    \item \texttt{pop()}: Removes and returns the top item from the stack.
+    \item \texttt{peek()}: Returns the top item without modifying the stack.
+\end{itemize}
+
+A stack can be implemented using either a dynamic array or a singly linked list. In an array-based implementation, the top is tracked by an integer index, yielding $O(1)$ amortized push operations and $O(1)$ pop operations. In a linked list implementation, push and pop operations perform node insertion and removal at the list head in deterministic $O(1)$ time.
+
+\begin{verbatim}
+Stack Conceptual Structure:
+
+      +----------+
+      |  Item C  |  <-- Top of Stack (Push / Pop)
+      +----------+
+      |  Item B  |
+      +----------+
+      |  Item A  |
+      +----------+
+\end{verbatim}
+
+\subsection{Queues}
+
+A \textbf{queue} is a linear data structure operating under a First-In, First-Out (FIFO) protocol. Elements are inserted at the rear and removed from the front.
+
+The core operations are:
+\begin{itemize}
+    \item \texttt{enqueue(item)}: Appends an element to the rear of the queue.
+    \item \texttt{dequeue()}: Removes and returns the element at the front of the queue.
+\end{itemize}
+
+Implementing a queue via a standard contiguous array can cause performance issues if dequeue operations shift remaining elements left, incurring $O(n)$ cost per operation. To maintain $O(1)$ operations, arrays are implemented as \textbf{circular queues}, where two index pointers (\texttt{front} and \texttt{rear}) wrap around the physical boundaries using modular arithmetic:
+\[
+\text{rear} = (\text{rear} + 1) \pmod{\text{capacity}}
+\]
+
+\begin{verbatim}
+Circular Queue Array Implementation:
+
+Array Indices:   0     1     2     3     4
+              +-----+-----+-----+-----+-----+
+Contents:     |  D  |  E  |     |  A  |  C  |
+              +-----+-----+-----+-----+-----+
+                   ^                 ^
+                   |                 |
+                 Rear              Front
+\end{verbatim}
+
+\subsection{Worked Example: Postfix Expression Evaluation using a Stack}
+
+Postfix notation (Reverse Polish Notation) eliminates the need for parentheses in arithmetic expressions by placing operators immediately after their operands. Evaluators process postfix strings sequentially from left to right using a stack:
+\begin{itemize}
+    \item If a value is an operand, push it onto the stack.
+    \item If a value is an operator, pop two operands from the stack, apply the operator (the second popped value is the left operand), and push the result back onto the stack.
+\end{itemize}
+
+Evaluate the postfix expression: $6 \quad 2 \quad 3 \quad * \quad + \quad 4 \quad -$
+
+\begin{table}[h!]
+\centering
+\caption{Step-by-step Evaluation of $6 \quad 2 \quad 3 \quad * \quad + \quad 4 \quad -$}
+\label{tab:postfix_trace}
+\begin{tabularx}{\textwidth}{@{} c c X >{\raggedright\arraybackslash}p{3.8cm} @{}}
+\toprule
+\textbf{Step} & \textbf{Token} & \textbf{Action} & \textbf{Stack State (Bottom to Top)} \\
+\midrule
+1 & $6$ & Push $6$ & $[6]$ \\
+2 & $2$ & Push $2$ & $[6, 2]$ \\
+3 & $3$ & Push $3$ & $[6, 2, 3]$ \\
+4 & $*$ & Pop $3, 2$; Evaluate $2 * 3 = 6$; Push $6$ & $[6, 6]$ \\
+5 & $+$ & Pop $6, 6$; Evaluate $6 + 6 = 12$; Push $12$ & $[12]$ \\
+6 & $4$ & Push $4$ & $[12, 4]$ \\
+7 & $-$ & Pop $4, 12$; Evaluate $12 - 4 = 8$; Push $8$ & $[8]$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The evaluation completes with a single final value $8$ remaining on top of the stack.
+
+\section{Nonlinear Structures: Binary Search Trees}
+
+Linear data structures require linear search time $O(n)$ for unsorted data. Hierarchical structures optimize search, insertion, and deletion times through branched structural paths.
+
+\subsection{Binary Search Tree Property}
+
+A \textbf{binary search tree} (BST) is a hierarchical, node-based tree structure. Each node contains a key, a satellite payload, a left reference pointer, and a right reference pointer. A binary tree satisfies the binary search tree property if for every node $N$:
+\begin{itemize}
+    \item Every node key in the left subtree of $N$ is strictly less than $N$'s key.
+    \item Every node key in the right subtree of $N$ is strictly greater than $N$'s key.
+\end{itemize}
+
+\begin{verbatim}
+Binary Search Tree Layout:
+
+       50
+      /  \
+    30    70
+   /  \     \
+  20  40    80
+\end{verbatim}
+
+\subsection{Core Operations and Algorithms}
+
+\subsubsection{Search and Insertion}
+Searching begins at the root node. The search key is compared against the current node key:
+\begin{itemize}
+    \item If equal, the node is returned.
+    \item If the search key is smaller, search recursively continues into the left child subtree.
+    \item If the search key is larger, search recursively continues into the right child subtree.
+\end{itemize}
+Insertion follows the same structural navigation path until reaching a \texttt{null} link, where the new node is attached as a leaf node.
+
+\subsubsection{Deletion}
+Tree node deletion must preserve the BST ordering invariant across three possible node configuration cases:
+\begin{enumerate}
+    \item \textbf{Node has no children (Leaf Node)}: Remove the node directly by setting its parent reference to \texttt{null}.
+    \item \textbf{Node has one child}: Replace the target node with its single child by pointing the target node's parent directly to that child.
+    \item \textbf{Node has two children}: Locate the node's \textbf{in-order successor} (the node with the smallest key in its right subtree). Copy the in-order successor's key and satellite payload into the target node, then recursively delete the in-order successor node from its original position (which is guaranteed to fall under Case 1 or Case 2).
+\end{enumerate}
+
+\begin{verbatim}
+Deletion of Node with Two Children (Deleting Node 30):
+
+       50                     50
+      /  \                   /  \
+    30    70   =====>      40    70
+   /  \     \             /        \
+  20  40    80           20        80
+\end{verbatim}
+
+\subsection{Tree Traversals}
+
+Tree traversal algorithms visit every node in a tree systematically in $O(n)$ time:
+\begin{itemize}
+    \item \textbf{In-Order Traversal (Left, Node, Right)}: Recursively visits the left subtree, processes the current node, and visits the right subtree. On a BST, this outputs keys in ascending sorted order.
+    \item \textbf{Pre-Order Traversal (Node, Left, Right)}: Processes the current node before visiting its subtrees. Used to clone or serialize tree topologies.
+    \item \textbf{Post-Order Traversal (Left, Right, Node)}: Processes both subtrees prior to evaluating the current node. Used in bottom-up memory deallocation and mathematical syntax tree evaluation.
+\end{itemize}
+
+\begin{verbatim}
+Tree Traversal Example:
+
+       F
+      / \
+     B   G
+    / \   \
+   A   D   I
+
+In-Order   (Left, Node, Right): A, B, D, F, G, I
+Pre-Order  (Node, Left, Right): F, B, A, D, G, I
+Post-Order (Left, Right, Node): A, D, B, I, G, F
+\end{verbatim}
+
+\section{Associative Mapping: Hash Tables}
+
+A \textbf{hash table} is an associative data structure designed to provide constant average-time $O(1)$ key search, insertion, and deletion. It maps keys to array index locations using a mathematical transformation called a hash function.
+
+\subsection{Hash Functions and Collisions}
+
+A hash function $h(k)$ maps an arbitrary key space $k$ to a bounded integer range $[0, M-1]$, where $M$ is the size of the underlying array table. A uniform hash function distributes keys evenly across all array indices to minimize collisions.
+
+A \textbf{hash collision} occurs when two distinct keys evaluate to identical indices ($h(k_1) = h(k_2)$ for $k_1 \neq k_2$). Because key spaces are typically much larger than array size $M$, collisions are unavoidable due to the Pigeonhole Principle.
+
+\subsection{Collision Resolution Techniques}
+
+\subsubsection{Separate Chaining}
+In separate chaining, each array slot acts as a reference to an independent linked list (or bucket) storing all key-value entries mapped to that index.
+
+\begin{verbatim}
+Separate Chaining Layout:
+
+ Slot
++---+
+| 0 | --> [ Null ]
++---+
+| 1 | --> [ KeyA | ValA ] ---> [ KeyB | ValB ] ---> Null
++---+
+| 2 | --> [ Null ]
++---+
+\end{verbatim}
+
+Search time in a chained table depends on the average list length, governed by the \textbf{load factor} $\alpha = n / M$, where $n$ is the total number of inserted keys and $M$ is table capacity.
+
+\subsubsection{Open Addressing}
+Open addressing stores all entries directly inside the primary array. When a collision occurs, the algorithm systematically probes alternate slots until an empty cell is found:
+\begin{itemize}
+    \item \textbf{Linear Probing}: Inspects sequential slots using index formula $h(k, i) = (h'(k) + i) \pmod M$ for probe step $i \in \{0, 1, \dots, M-1\}$. This approach can lead to primary clustering, where contiguous blocks of occupied slots build up and slow down lookups.
+    \item \textbf{Quadratic Probing}: Uses a non-linear quadratic offset $h(k, i) = (h'(k) + c_1 i + c_2 i^2) \pmod M$ to reduce primary clustering.
+    \item \textbf{Double Hashing}: Uses a secondary independent hash function $h_2(k)$ to calculate probe step sizes: $h(k, i) = (h_1(k) + i \cdot h_2(k)) \pmod M$.
+\end{itemize}
+
+\subsection{Worked Example: Collision Resolution in Hash Tables}
+
+Insert integer keys $[15, 22, 8, 29]$ into a hash table of size $M = 7$ using hash function $h(k) = k \pmod 7$.
+
+\begin{itemize}
+    \item Insert $15$: $h(15) = 15 \pmod 7 = 1$. Slot $1$ is empty. Place $15$ at index $1$.
+    \item Insert $22$: $h(22) = 22 \pmod 7 = 1$. Collision at slot $1$.
+    \item Insert $8$: $h(8) = 8 \pmod 7 = 1$. Collision at slot $1$.
+    \item Insert $29$: $h(29) = 29 \pmod 7 = 1$. Collision at slot $1$.
+\end{itemize}
+
+Using \textbf{Linear Probing}:
+\begin{enumerate}
+    \item Key $15$ goes to slot $1$.
+    \item Key $22$ hashes to $1$ (occupied). Probe index $(1+1) \pmod 7 = 2$. Place $22$ at slot $2$.
+    \item Key $8$ hashes to $1$ (occupied). Probe index $2$ (occupied). Probe index $(1+2) \pmod 7 = 3$. Place $8$ at slot $3$.
+    \item Key $29$ hashes to $1$ (occupied). Probe index $2$ (occupied), index $3$ (occupied), index $(1+3) \pmod 7 = 4$. Place $29$ at slot $4$.
+\end{enumerate}
+
+\begin{verbatim}
+Linear Probing Result Table:
+Index:   0      1      2      3      4      5      6
+      +------+------+------+------+------+------+------+
+Keys: | Null |  15  |  22  |  8   |  29  | Null | Null |
+      +------+------+------+------+------+------+------+
+\end{verbatim}
+
+Using \textbf{Separate Chaining}:
+\begin{verbatim}
+Separate Chaining Result Table:
+Index 1: [ 15 ] ---> [ 22 ] ---> [ 8 ] ---> [ 29 ] ---> Null
+\end{verbatim}
+
+\section{Comparative Analysis and Systemic Applications}
+
+Selecting the right data structure requires evaluating operational performance, memory overhead, and implementation trade-offs.
+
+\begin{table}[h!]
+\centering
+\caption{Algorithmic Time and Space Complexity Comparison}
+\label{tab:complexity_comparison}
+\begin{tabularx}{\textwidth}{@{} >{\raggedright\arraybackslash}p{2.8cm} X X X X @{}}
+\toprule
+\textbf{Data Structure} & \textbf{Average Access} & \textbf{Average Search} & \textbf{Average Insertion} & \textbf{Average Deletion} \\
+\midrule
+Singly Linked List & $\Theta(n)$ & $\Theta(n)$ & $\Theta(1)^*$ & $\Theta(1)^*$ \\
+Doubly Linked List & $\Theta(n)$ & $\Theta(n)$ & $\Theta(1)^*$ & $\Theta(1)^*$ \\
+Stack (Array/List) & $\Theta(n)$ & $\Theta(n)$ & $\Theta(1)$ & $\Theta(1)$ \\
+Queue (Array/List) & $\Theta(n)$ & $\Theta(n)$ & $\Theta(1)$ & $\Theta(1)$ \\
+Binary Search Tree & $\Theta(\log n)$ & $\Theta(\log n)$ & $\Theta(\log n)$ & $\Theta(\log n)$ \\
+Hash Table & N/A & $\Theta(1)$ & $\Theta(1)$ & $\Theta(1)$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent{\small $^*$Note: Insertion and deletion operations for linked lists run in $O(1)$ time given a direct pointer reference to the target position; otherwise, locating the position requires $O(n)$ search time.}
+
+\subsection{Integrated Software Applications}
+
+Real-world applications combine these core structures to manage operational tasks efficiently:
+\begin{itemize}
+    \item \textbf{Text Editor Undo/Redo System}: Dual stack structures store operational state histories. Undoing an action pops state data from the undo stack and pushes it onto the redo stack.
+    \item \textbf{Task Scheduling and Breadth-First Search (BFS)}: Operating system process managers and graph traversal algorithms use queues to maintain execution order and process nodes sequentially.
+    \item \textbf{Database Indexing and Symbol Tables}: Compilers use hash tables for constant-time lookup in scope symbol tables, while binary search trees support range queries and sorted index scans.
+\end{itemize}
+
+\section{Conclusion}
+
+Concrete data structure implementations determine how efficient a program is in terms of speed and memory usage. Pointer-based structures manage dynamic memory allocation flexibly, restricted linear structures enforce strict access rules, hierarchical trees optimize ordered searching, and hash functions enable constant-time data retrieval. Understanding these internal mechanics provides the foundation for the next chapter, which covers choosing and tailoring the right data structure to solve complex, real-world problems.
 
 \section*{Tutorial Questions}
+
 \begin{enumerate}
-\item Define an array and explain how the index of an element is used to compute its memory address.
-\item Compare stack allocation and heap allocation in the context of array storage.
-\item Describe the difference between an array and a record in terms of element types and access methods.
-\item Explain how memory alignment and padding can affect the size of a record in memory.
-\item What is the difference between a mutable string and an immutable string?
-\item List four common operations in string processing and briefly describe each.
-\item Given an array of integers containing the values 7, 2, 9, 4, and 1, what value is stored at index 3 if indexing begins at zero?
+    \item Compare the operational time complexity and memory layouts of dynamic arrays and singly linked lists. Identify scenarios where each structure is preferred over the other.
+    
+    \item Trace the following operations on an initially empty stack: \texttt{push(12)}, \texttt{push(7)}, \texttt{pop()}, \texttt{push(19)}, \texttt{push(3)}, \texttt{pop()}, \texttt{peek()}. Draw the stack layout at each step and state the value returned by the final \texttt{peek()} operation.
+    
+    \item Explain why a standard array implementation of a queue can result in an $O(n)$ dequeue runtime performance. Show how a circular array structure resolves this issue using modular arithmetic.
+    
+    \item Evaluate the following postfix expression step-by-step using a stack, showing the stack state after reading each token:
+    \[
+    8 \quad 4 \quad 2 \quad / \quad * \quad 3 \quad + \quad 5 \quad -
+    \]
+    
+    \item Given an unweighted binary search tree containing keys $[50, 25, 75, 10, 30, 60, 80]$, construct the resulting tree topology. Demonstrate step-by-step node updates when deleting key $25$.
+    
+    \item Insert keys $[18, 26, 35, 9, 44, 27]$ into a hash table of size $M = 7$ using hash function $h(k) = k \pmod 7$. Draw the resulting table structures under:
+    \begin{enumerate}
+        \item Linear Probing Open Addressing.
+        \item Separate Chaining.
+    \end{enumerate}
+    
+    \item A system developer uses a binary search tree to store symbol table keys. Under worst-case insertion conditions, operations degrade to $O(n)$ time. Explain why this degradation occurs and propose an architectural modification to ensure worst-case $O(\log n)$ performance.
+    
+    \item High-performance caching layers use a Least Recently Used (LRU) policy, which requires fast element access and fast structural updates. Identify two data structures covered in this chapter that can be combined to support $O(1)$ search and $O(1)$ displacement operations, and explain how they interact.
 \end{enumerate}
-[/CHAPTER]
 
 \end{document}
